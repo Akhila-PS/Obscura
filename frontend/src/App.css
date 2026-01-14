@@ -1,0 +1,67 @@
+.app-container {
+  padding: 60px 24px;
+}
+
+/* Title */
+.project-title {
+  font-size: 2.6rem;
+  font-weight: 600;
+  text-align: center;
+  letter-spacing: 0.4px;
+}
+
+.project-subtitle {
+  text-align: center;
+  margin-top: 6px;
+  color: #9ca3af;
+  font-size: 0.95rem;
+}
+
+/* Upload Card */
+.upload-card {
+  margin-top: 48px;
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 18px;
+  padding: 40px 28px;
+  text-align: center;
+}
+
+/* Upload Icon */
+.upload-icon {
+  font-size: 42px;
+  color: #3b82f6;
+  margin-bottom: 12px;
+}
+
+/* Upload Button */
+.upload-btn {
+  margin-top: 14px;
+  background: #3b82f6 !important;
+  color: white !important;
+  padding: 10px 28px !important;
+  font-weight: 500 !important;
+  border-radius: 8px !important;
+  text-transform: none !important;
+}
+
+/* Result Card */
+.result-card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 18px;
+  padding: 28px;
+}
+
+/* Images / PDF */
+.result-img {
+  width: 100%;
+  border-radius: 10px;
+}
+
+.result-pdf {
+  width: 100%;
+  height: 420px;
+  border-radius: 10px;
+  border: 1px solid #1f2937;
+}

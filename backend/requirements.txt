@@ -1,0 +1,10 @@
+flask
+flask-cors
+opencv-python
+easyocr
+torch
+transformers
+pillow
+numpy
+pdf2image
+reportlab
