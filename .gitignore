@@ -46,3 +46,7 @@ Thumbs.db
 # *.png
 # *.jpg
 # haarcascade_frontalface_default.xml   ← only uncomment if you want to ignore it
+
+# Ignore all upload/output/temp files
+backend/uploads/
+backend/models/
