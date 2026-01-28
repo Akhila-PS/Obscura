@@ -50,3 +50,6 @@ Thumbs.db
 # Ignore all upload/output/temp files
 backend/uploads/
 backend/models/
+*.pdf
+*.png
+*.jpg
