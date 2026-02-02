@@ -32,7 +32,11 @@ export default function ResultsSection({
             Original File
           </Typography>
           {outputType === "pdf" ? (
-            <iframe src={originalFile} style={{ width: '100%', height: '500px', borderRadius: 12, border: '1px solid' }} />
+            <iframe
+              title="Original PDF preview"
+              src={originalFile}
+              style={{ width: '100%', height: '500px', borderRadius: 12, border: '1px solid' }}
+            />
           ) : (
             <Box
               component="img"
@@ -53,7 +57,11 @@ export default function ResultsSection({
             Redacted & Protected
           </Typography>
           {outputType === "pdf" ? (
-            <iframe src={redactedOutput} style={{ width: '100%', height: '500px', borderRadius: 12, border: '1px solid' }} />
+            <iframe
+              title="Redacted PDF preview"
+              src={redactedOutput}
+              style={{ width: '100%', height: '500px', borderRadius: 12, border: '1px solid' }}
+            />
           ) : (
             <Box
               component="img"

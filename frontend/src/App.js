@@ -38,6 +38,11 @@ function App() {
   };
 
   const handleUpload = async (file) => {
+    if (!file) {
+      setError("No file selected.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setOriginalFile(URL.createObjectURL(file));
@@ -46,7 +51,10 @@ function App() {
     formData.append("image", file);
 
     try {
-      const res = await axios.post("http://localhost:5000/upload", formData);
+      // Let axios set the correct multipart boundary automatically.
+      const res = await axios.post("http://localhost:5000/upload", formData, {
+        timeout: 120000,
+      });
 
       setOutputType(res.data.type);
       setRiskScore(res.data.risk_score);
@@ -62,8 +70,18 @@ function App() {
         const blob = new Blob([bytes], { type: "application/pdf" });
         setRedactedOutput(URL.createObjectURL(blob));
       }
-    } catch {
-      setError("Failed to process file. Please try again.");
+    } catch (err) {
+      console.error("Upload error:", {
+        message: err?.message,
+        code: err?.code,
+        status: err?.response?.status,
+        data: err?.response?.data,
+      });
+      const errorMessage =
+        err?.response?.data?.error ||
+        err?.message ||
+        "Failed to process file. Please try again.";
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
