@@ -1,33 +1,65 @@
 # ocr/printed_ocr.py
+
 import easyocr
 
-# Initialize EasyOCR reader once (reused across calls)
-reader = easyocr.Reader(['en'], gpu=False)
+#Initialize EasyOCR
+reader = easyocr.Reader(
+    ['en'], 
+    gpu=False,
+    model_storage_directory='./models',  
+    download_enabled=True,  
+    verbose=False  
+)
 
-
-def extract_printed_text(image):
-    """
-    Accepts a numpy image (already preprocessed by preprocess_image in main.py).
+def extract_printed_text(image, batch_mode=True):
     
-    Args:
-        image: Preprocessed numpy array from cv2
+    print(f"\n📝 Starting OCR text extraction...")
+    
+    try:
+        results = reader.readtext(
+            image,
+            batch_size=1,     
+            workers=0,       
+            paragraph=False, 
+            min_size=5,       
+            text_threshold=0.5, 
+            low_text=0.3,     
+        )
         
-    Returns:
-        List of tuples: [(bbox, text, confidence), ...]
-        where bbox is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-    """
-    # Run OCR directly - image is ALREADY preprocessed
-    # DO NOT preprocess again here!
-    results = reader.readtext(image)
-    
-    # Filter by confidence AND format bounding boxes
-    formatted = []
-    for bbox, text, conf in results:
-        if conf >= 0.5:  # Consistent confidence threshold
-            # Ensure integer coordinates for cv2
-            bbox = [[int(x), int(y)] for x, y in bbox]
-            formatted.append((bbox, text, conf))
-    
-    print(f"📊 OCR found {len(results)} items, kept {len(formatted)} after confidence filter")
-    
-    return formatted
+        print(f"✅ OCR completed: {len(results)} text regions found")
+        
+       
+        if results:
+            print(f"\n📋 Sample OCR results (first 5):")
+            for i, (bbox, text, conf) in enumerate(results[:5]):
+                print(f"   [{i+1}] Text: '{text}' | Confidence: {conf:.2f}")
+            
+            if len(results) > 5:
+                print(f"   ... and {len(results) - 5} more text regions")
+            
+        
+            avg_conf = sum(conf for _, _, conf in results) / len(results)
+            high_conf = sum(1 for _, _, conf in results if conf > 0.7)
+            med_conf = sum(1 for _, _, conf in results if 0.3 <= conf <= 0.7)
+            low_conf = sum(1 for _, _, conf in results if conf < 0.3)
+            
+            print(f"\n📊 OCR Confidence Statistics:")
+            print(f"   Average: {avg_conf:.2f}")
+            print(f"   High (>0.7): {high_conf} regions")
+            print(f"   Medium (0.3-0.7): {med_conf} regions")
+            print(f"   Low (<0.3): {low_conf} regions")
+        else:
+            print(f"⚠️  WARNING: No text detected by OCR!")
+            print(f"   Possible causes:")
+            print(f"   - Image quality too low")
+            print(f"   - Text too small or blurry")
+            print(f"   - Non-standard fonts")
+            print(f"   - Image preprocessing failed")
+        
+        return results
+        
+    except Exception as e:
+        print(f"❌ ERROR during OCR: {e}")
+        import traceback
+        traceback.print_exc()
+        return []

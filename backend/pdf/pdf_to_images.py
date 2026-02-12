@@ -5,12 +5,7 @@ from pdf2image import convert_from_path
 
 
 def _get_poppler_path():
-    """
-    Use POPPLER_PATH environment variable if set; otherwise rely on system PATH.
     
-    Returns:
-        Path to Poppler bin directory or None if using system PATH
-    """
     path = os.environ.get("POPPLER_PATH")
     if path and os.path.isdir(path):
         return path
@@ -23,19 +18,7 @@ def _get_poppler_path():
 
 
 def pdf_to_images(pdf_path, output_dir):
-    """
-    Convert PDF to PNG images (one per page).
-    
-    Args:
-        pdf_path: Path to input PDF file
-        output_dir: Directory to save page images
-        
-    Returns:
-        List of paths to saved page images
-        
-    Raises:
-        ValueError: If Poppler is not found or conversion fails
-    """
+   
     os.makedirs(output_dir, exist_ok=True)
 
     poppler_path = _get_poppler_path()
@@ -49,7 +32,6 @@ def pdf_to_images(pdf_path, output_dir):
     except Exception as e:
         err = str(e).strip()
         
-        # Provide helpful error message if Poppler is missing
         if "poppler" in err.lower() or "pdftoppm" in err.lower() or "pdfinfo" in err.lower():
             raise ValueError(
                 "❌ Poppler not found. Please install Poppler and add its 'bin' folder to PATH, "

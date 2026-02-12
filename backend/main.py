@@ -1,4 +1,7 @@
-# main.py
+"""
+Integrated Flask backend for both Sensitive Data Redaction and Metadata Redaction
+FIXED VERSION - All bugs corrected
+"""
 import os
 import sys
 import cv2
@@ -7,26 +10,42 @@ import mimetypes
 import uuid
 import traceback
 import shutil
+import json
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+from PIL import Image, ExifTags
 
 from preprocessing.metadata_removal import remove_metadata
 from preprocessing.image_cleaner import preprocess_image
+
 from ocr.printed_ocr import extract_printed_text
+
 from redaction.sensitive_detector_image import (
     find_aadhaar_boxes,
     find_vid_boxes,
+    find_pan_boxes,  
     find_phone_boxes,
+    find_qr_codes,
+    find_faces,
+    find_email_boxes,
+    find_license_plate_boxes,
 )
-from redaction.redactor import redact_boxes
+
+from redaction.redactor import (
+    redact_boxes,
+    blur_boxes,
+    add_watermark,
+)
+
 from pdf.pdf_to_images import pdf_to_images
 from pdf.images_to_pdf import images_to_pdf
+
 
 app = Flask(__name__)
 CORS(app)
 
-# Upload directories
 UPLOAD_ORIGINAL = "uploads/original"
 UPLOAD_REDACTED = "uploads/redacted"
 UPLOAD_TEMP = "uploads/temp_pages"
@@ -36,7 +55,8 @@ for d in [UPLOAD_ORIGINAL, UPLOAD_REDACTED, UPLOAD_TEMP]:
 
 
 def _scale_ocr_boxes(ocr_results, scale_x, scale_y):
-    """Map bbox coordinates from preprocessed (possibly upscaled) image back to original."""
+    """
+    """
     if scale_x == 1.0 and scale_y == 1.0:
         return ocr_results
     
@@ -44,178 +64,431 @@ def _scale_ocr_boxes(ocr_results, scale_x, scale_y):
     for bbox, text, conf in ocr_results:
         scaled_bbox = [[p[0] / scale_x, p[1] / scale_y] for p in bbox]
         scaled.append((scaled_bbox, text, conf))
-    
     return scaled
 
 
-# ---------------- IMAGE / PAGE PROCESSING ----------------
-def process_image(image_path, output_path, source_type="image"):
-    """
-    Process both images and PDF pages using the SAME logic.
-    Uses regex-based detection for all sensitive data.
-    """
-    if not os.path.exists(image_path):
-        raise ValueError(f"File not found: {image_path}")
 
-    # ---- METADATA REMOVAL ----
+
+def process_image_with_options(image_path, output_path, options, source_type="image"):
+    """
+    Process image with user-selected redaction options.
+    FIXED: Added comprehensive logging and PAN detection
+    """
+    print(f"\n{'='*70}")
+    print(f"🎯 STARTING REDACTION PROCESS - {source_type.upper()}")
+    print(f"{'='*70}")
+    print(f"📂 Input:  {image_path}")
+    print(f"📂 Output: {output_path}")
+    print(f"⚙️  Options: {options}")
+    
+    if not os.path.exists(image_path):
+        print(f"❌ ERROR: Input file doesn't exist!")
+        raise ValueError(f"File not found: {image_path}")
+    
+    file_size = os.path.getsize(image_path)
+    print(f"✅ Input file exists ({file_size} bytes)")
+    
+    default_options = {
+        "aadhaar": True,
+        "vid": True,
+        "pan": True,     # ADDED
+        "phone": True,
+        "qr": True,
+        "face": False,
+        "email": False,
+        "plate": False,
+        "watermark": True,
+    }
+    
+    redaction_opts = {**default_options, **options}
+    active_redactions = [k for k, v in redaction_opts.items() if v]
+    print(f"\n🔧 Active redactions ({len(active_redactions)}): {', '.join(active_redactions)}")
+    
+    print(f"\n📋 Step 1: Removing metadata...")
     clean_path = image_path + "_clean.png"
     remove_metadata(image_path, clean_path)
-
+    
     if not os.path.exists(clean_path):
+        print(f"❌ ERROR: Metadata removal failed!")
         raise ValueError("Metadata removal failed")
-
-    # ---- OCR PREPROCESS ----
+    print(f"✅ Metadata removed, clean image: {clean_path}")
+    
+    print(f"\n📋 Step 2: Preprocessing for OCR...")
     ocr_ready, (scale_x, scale_y) = preprocess_image(clean_path)
-
-    # ---- OCR ----
+    print(f"✅ Image preprocessed (scale: {scale_x:.2f}x, {scale_y:.2f}y)")
+    
+    print(f"\n📋 Step 3: Extracting text with OCR...")
     ocr_results = extract_printed_text(ocr_ready)
+    print(f"📝 OCR found {len(ocr_results)} text regions")
     
-    # Scale boxes back to original image coordinates
+    for i, (bbox, text, conf) in enumerate(ocr_results[:5]):
+        print(f"   [{i+1}] '{text}' (confidence: {conf:.2f})")
+    if len(ocr_results) > 5:
+        print(f"   ... and {len(ocr_results) - 5} more")
+    
     ocr_results = _scale_ocr_boxes(ocr_results, scale_x, scale_y)
-
-    # ---- DETECTION (SAME FOR BOTH IMAGE AND PDF) ----
-    print(f"\n🔍 Detecting sensitive data in {source_type}...")
+    print(f"✅ OCR boxes scaled back to original coordinates")
     
-    aadhaar_boxes = find_aadhaar_boxes(ocr_results)
-    vid_boxes = find_vid_boxes(ocr_results)
-    phone_boxes = find_phone_boxes(ocr_results)
+    print(f"\n📋 Step 4: Detecting sensitive data...")
+    detection_results = []
+    
+    
+    if redaction_opts.get("aadhaar", True):
+        print(f"   🔍 Detecting Aadhaar numbers...")
+        aadhaar_boxes = find_aadhaar_boxes(ocr_results)
+        if aadhaar_boxes:
+           detection_results.append((aadhaar_boxes, "Aadhaar number", "redact"))
+        print(f"      ✅ Found {len(aadhaar_boxes)} Aadhaar number(s)")
+    
+    if redaction_opts.get("vid", True):
+        print(f"   🔍 Detecting VID...")
+        vid_boxes = find_vid_boxes(ocr_results)
+        if vid_boxes:
+            detection_results.append((vid_boxes, "VID", "redact"))
+            print(f"      ✅ Found {len(vid_boxes)} VID(s)")
+    
+    if redaction_opts.get("pan", True):
+        print(f"   🔍 Detecting PAN cards...")
+        pan_boxes = find_pan_boxes(ocr_results)
+        if pan_boxes:
+            detection_results.append((pan_boxes, "PAN card", "redact"))
+            print(f"      ✅ Found {len(pan_boxes)} PAN card(s)")
+    
+    if redaction_opts.get("phone", True):
+        print(f"   🔍 Detecting phone numbers...")
+        phone_boxes = find_phone_boxes(ocr_results)
+        if phone_boxes:
+            detection_results.append((phone_boxes, "Phone number", "redact"))
+            print(f"      ✅ Found {len(phone_boxes)} phone number(s)")
+    
+    if redaction_opts.get("qr", True):
+        print(f"   🔍 Detecting QR codes...")
+        qr_boxes = find_qr_codes(clean_path)
+        if qr_boxes:
+            detection_results.append((qr_boxes, "QR code", "redact"))
+            print(f"      ✅ Found {len(qr_boxes)} QR code(s)")
+    
+    if redaction_opts.get("face", False):
+        print(f"   🔍 Detecting faces...")
+        face_boxes = find_faces(clean_path)
+        if face_boxes:
+            detection_results.append((face_boxes, "Face", "blur"))
+            print(f"      ✅ Found {len(face_boxes)} face(s)")
+    
 
-    # ---- REDACTION ----
+    if redaction_opts.get("email", False):
+        print(f"   🔍 Detecting emails...")
+        email_boxes = find_email_boxes(ocr_results)
+        if email_boxes:
+            detection_results.append((email_boxes, "Email address", "redact"))
+            print(f"      ✅ Found {len(email_boxes)} email(s)")
+    
+    if redaction_opts.get("plate", False):
+        print(f"   🔍 Detecting license plates...")
+        plate_boxes = find_license_plate_boxes(ocr_results)
+        if plate_boxes:
+            detection_results.append((plate_boxes, "License plate", "redact"))
+            print(f"      ✅ Found {len(plate_boxes)} license plate(s)")
+    
+    print(f"\n📊 Detection Summary:")
+    if detection_results:
+        print(f"   Total types detected: {len(detection_results)}")
+        for boxes, label, method in detection_results:
+            print(f"   ✓ {label}: {len(boxes)} instance(s) ({method})")
+    else:
+        print(f"   ⚠️  No sensitive data detected!")
+    
+    print(f"\n📋 Step 5: Loading image for redaction...")
     image = cv2.imread(clean_path)
     if image is None:
+        print(f"❌ ERROR: Failed to load cleaned image!")
         raise ValueError(f"Failed to read cleaned image: {clean_path}")
-
-    # Redact all detected boxes
-    detection_results = [
-        (aadhaar_boxes, "Aadhaar number"),
-        (vid_boxes, "VID"),
-        (phone_boxes, "Phone number"),
-    ]
     
-    for boxes, label in detection_results:
-        if boxes:
-            image = redact_boxes(image, boxes)
-            print(f"  ✅ Redacted {len(boxes)} {label}(s)")
-
-    # Save redacted image
-    cv2.imwrite(output_path, image)
-    print(f"💾 Saved redacted image: {output_path}")
-
-    # ---- EXPLANATIONS ----
+    print(f"✅ Image loaded: {image.shape} (H×W×C)")
+    
+    print(f"\n📋 Step 6: Applying redactions...")
     explanations = []
-    for boxes, label in detection_results:
-        explanations.extend([f"{label} redacted"] * len(boxes))
-
+    
+    for boxes, label, method in detection_results:
+        if method == "blur":
+            print(f"   🔵 Blurring {len(boxes)} {label}(s)...")
+            image = blur_boxes(image, boxes)
+            explanations.extend([f"{label} blurred"] * len(boxes))
+            
+        
+        else:
+            print(f"   ✅ Fully redacting {len(boxes)} {label}(s)...")
+            image = redact_boxes(image, boxes)
+            explanations.extend([f"{label} redacted"] * len(boxes))
+    
+    if redaction_opts.get("watermark", True):
+        print(f"\n📋 Step 7: Adding watermark...")
+        image = add_watermark(image, "REDACTED BY OBSCURA - NOT FOR OFFICIAL VERIFICATION")
+    
+    print(f"\n📋 Step 8: Saving redacted image...")
+    print(f"   Saving to: {output_path}")
+    success = cv2.imwrite(output_path, image)
+    
+    if success and os.path.exists(output_path):
+        output_size = os.path.getsize(output_path)
+        print(f"✅ Redacted image saved successfully ({output_size} bytes)")
+    else:
+        print(f"❌ ERROR: Failed to save output file!")
+        raise ValueError("Failed to save redacted image")
+    
+    print(f"\n📋 Step 9: Cleanup...")
+    if os.path.exists(clean_path):
+        os.remove(clean_path)
+        print(f"✅ Cleaned up temporary file: {clean_path}")
+    
+    print(f"\n{'='*70}")
+    print(f"✅ REDACTION COMPLETE - {len(explanations)} items redacted")
+    print(f"{'='*70}\n")
+    
     return explanations
 
 
-# ---------------- UPLOAD ROUTE ----------------
 @app.route("/upload", methods=["POST"])
 def upload():
+    """
+    Main upload endpoint for sensitive data redaction.
+    """
     try:
+        print(f"\n{'#'*70}")
+        print(f"📤 NEW UPLOAD REQUEST RECEIVED")
+        print(f"{'#'*70}")
+        
         if "image" not in request.files:
+            print(f"❌ ERROR: No 'image' key in request.files")
             return jsonify({"error": "Form-data key must be 'image'"}), 400
-
+        
         file = request.files["image"]
         if not file.filename:
+            print(f"❌ ERROR: Empty filename")
             return jsonify({"error": "Empty filename"}), 400
-
+        
+        options_json = request.form.get("options", "{}")
+        try:
+            options = json.loads(options_json)
+            print(f"⚙️  Redaction options: {options}")
+        except json.JSONDecodeError:
+            print(f"⚠️  Invalid JSON in options, using defaults")
+            options = {}
+        
         filename = secure_filename(file.filename.lower())
         uid = uuid.uuid4().hex
         name, ext = os.path.splitext(filename)
         saved_name = f"{name}_{uid}{ext}"
-        original_path = os.path.join(UPLOAD_ORIGINAL, saved_name)
         
-        # Save uploaded file
+        original_path = os.path.join(UPLOAD_ORIGINAL, saved_name)
         file.save(original_path)
-        print(f"\n📤 Received file: {filename} → {saved_name}")
-
+        print(f"📥 File saved: {filename} → {saved_name}")
+        
         file_type, _ = mimetypes.guess_type(original_path)
         if not file_type:
+            print(f"❌ ERROR: Unsupported file type")
             return jsonify({"error": "Unsupported file type"}), 400
-
+        
+        print(f"📄 File type: {file_type}")
+        
         explanations = []
-
-        # ---------------- IMAGE ----------------
+        
         if file_type.startswith("image"):
-            print(f"🖼️  Processing as IMAGE")
-            output_path = os.path.join(
-                UPLOAD_REDACTED,
-                f"{name}_{uid}_redacted.png"
+            print(f"\n🖼️  Processing as IMAGE...")
+            output_path = os.path.join(UPLOAD_REDACTED, f"{name}_{uid}_redacted.png")
+            
+            explanations = process_image_with_options(
+                original_path, output_path, options, source_type="image"
             )
             
-            explanations = process_image(original_path, output_path, source_type="image")
-
             with open(output_path, "rb") as f:
                 encoded = base64.b64encode(f.read()).decode()
-
-            # Calculate risk score (cap at 100)
+            
             risk_score = min(len(explanations) * 20, 100)
-
+            
+            print(f"\n✅ IMAGE PROCESSING COMPLETE")
+            print(f"   Risk score: {risk_score}")
+            print(f"   Explanations: {len(explanations)}")
+            
             return jsonify({
                 "type": "image",
                 "risk_score": risk_score,
                 "explanations": explanations,
                 "redacted_image": encoded
             })
-
-        # ---------------- PDF ----------------
+        
         elif file_type == "application/pdf":
-            print(f"📄 Processing as PDF")
+            print(f"\n📄 Processing as PDF...")
             temp_dir = os.path.join(UPLOAD_TEMP, uid)
             os.makedirs(temp_dir, exist_ok=True)
-
+            
             try:
-                # Convert PDF to images
                 pages = pdf_to_images(original_path, temp_dir)
-                print(f"📑 PDF has {len(pages)} pages")
+                print(f"📑 PDF converted to {len(pages)} page(s)")
                 
                 redacted_pages = []
-
-                # Process each page
                 for i, page in enumerate(pages, 1):
-                    print(f"\n--- Processing page {i}/{len(pages)} ---")
+                    print(f"\n{'─'*70}")
+                    print(f"📄 Processing page {i}/{len(pages)}")
+                    print(f"{'─'*70}")
+                    
                     out_page = page.replace(".png", "_redacted.png")
-                    page_explanations = process_image(page, out_page, source_type="pdf")
+                    
+                    page_explanations = process_image_with_options(
+                        page, out_page, options, source_type=f"pdf page {i}"
+                    )
+                    
                     explanations.extend(page_explanations)
                     redacted_pages.append(out_page)
-
-                # Convert back to PDF
+                
                 final_pdf = os.path.join(UPLOAD_REDACTED, f"redacted_{uid}.pdf")
+                print(f"\n📄 Creating final PDF: {final_pdf}")
                 images_to_pdf(redacted_pages, final_pdf)
-                print(f"\n✅ Created final PDF: {final_pdf}")
-
+                
+                if os.path.exists(final_pdf):
+                    pdf_size = os.path.getsize(final_pdf)
+                    print(f"✅ Final PDF created ({pdf_size} bytes)")
+                
                 with open(final_pdf, "rb") as f:
                     encoded = base64.b64encode(f.read()).decode()
-
-                # Calculate risk score (cap at 100)
+                
                 risk_score = min(len(explanations) * 20, 100)
-
+                
+                print(f"\n✅ PDF PROCESSING COMPLETE")
+                print(f"   Total pages: {len(pages)}")
+                print(f"   Risk score: {risk_score}")
+                print(f"   Total redactions: {len(explanations)}")
+                
                 return jsonify({
                     "type": "pdf",
                     "risk_score": risk_score,
                     "explanations": explanations,
                     "redacted_pdf": encoded
                 })
-
+            
             finally:
-                # CLEANUP: Remove temporary files
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir, ignore_errors=True)
                     print(f"🗑️  Cleaned up temp directory: {temp_dir}")
-
+        
         else:
+            print(f"❌ ERROR: Unsupported format: {file_type}")
             return jsonify({"error": "Unsupported format (expected image or PDF)"}), 400
-
+    
     except Exception as e:
+        print(f"\n{'!'*70}")
+        print(f"❌ EXCEPTION OCCURRED")
+        print(f"{'!'*70}")
         traceback.print_exc(file=sys.stderr)
+        print(f"{'!'*70}\n")
         return jsonify({"error": str(e)}), 500
 
 
+
+@app.route("/metadata", methods=["POST"])
+def metadata():
+    """
+    Extract and analyze metadata from an image.
+    """
+    if "image" not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+
+    filename = secure_filename(file.filename.lower())
+    uid = uuid.uuid4().hex
+    name, ext = os.path.splitext(filename)
+    original_path = os.path.join(UPLOAD_ORIGINAL, f"{name}_{uid}{ext}")
+    file.save(original_path)
+
+    try:
+        img = Image.open(original_path)
+        exif_data = img._getexif() or {}
+        metadata = {}
+        
+        for tag_id, value in exif_data.items():
+            decoded_tag = ExifTags.TAGS.get(tag_id, tag_id)
+            
+            if decoded_tag == "GPSInfo":
+                gps_info = {}
+                for gps_tag_id, gps_value in value.items():
+                    gps_decoded = ExifTags.GPSTAGS.get(gps_tag_id, gps_tag_id)
+                    gps_info[gps_decoded] = str(gps_value)
+                metadata["GPSInfo"] = str(gps_info)
+            else:
+                metadata[decoded_tag] = str(value)
+
+        # Calculate risk based on sensitive tags
+        sensitive_tags = ['GPSInfo', 'Make', 'Model', 'DateTime', 'Software', 'Artist', 'Copyright']
+        sensitive_count = sum(1 for k in metadata if any(t in str(k) for t in sensitive_tags))
+        risk_score = min(sensitive_count * 20, 100)
+
+        explanations = [
+            f"{k}: {v[:50]}..." for k, v in metadata.items() 
+            if any(t in str(k) for t in sensitive_tags)
+        ] or ["No sensitive metadata found"]
+
+        return jsonify({
+            "metadata": metadata,
+            "risk_score": risk_score,
+            "explanations": explanations
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Metadata extraction failed: {str(e)}"}), 500
+
+
+@app.route("/strip-metadata", methods=["POST"])
+def strip_metadata():
+    """
+    Strip all metadata from an image.
+    """
+    if "image" not in request.files:
+        return jsonify({"error": "Form-data key must be 'image'"}), 400
+
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+    
+    filename = secure_filename(file.filename.lower())
+    uid = uuid.uuid4().hex
+    name, ext = os.path.splitext(filename)
+    original_path = os.path.join(UPLOAD_ORIGINAL, f"{name}_{uid}{ext}")
+    file.save(original_path)
+
+    clean_path = os.path.join(UPLOAD_REDACTED, f"{name}_{uid}_clean.png")
+    
+    try:
+        remove_metadata(original_path, clean_path)
+
+        with open(clean_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode()
+
+        return jsonify({
+            "redacted_image": encoded,
+            "message": "Metadata stripped successfully"
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Metadata stripping failed: {str(e)}"}), 500
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
 if __name__ == "__main__":
-    print("🚀 Starting Document Redaction Server...")
+    print("🚀 Starting Integrated Document Redaction Server...")
     print("📁 Upload directories ready:")
     print(f"   - Original: {UPLOAD_ORIGINAL}")
     print(f"   - Redacted: {UPLOAD_REDACTED}")
     print(f"   - Temp: {UPLOAD_TEMP}")
+    print("\n🔧 Available endpoints:")
+    print("   - POST /upload (Sensitive data redaction)")
+    print("   - POST /metadata (Extract metadata)")
+    print("   - POST /strip-metadata (Remove metadata)")
     app.run(debug=True)

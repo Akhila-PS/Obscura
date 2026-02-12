@@ -7,12 +7,11 @@ def images_to_pdf(image_paths, output_pdf):
     """
     Convert multiple images to a single PDF.
     
-    Args:
-        image_paths: List of paths to image files
-        output_pdf: Path where output PDF should be saved
+    
+        image_paths: 
+        output_pdf: 
         
-    Raises:
-        ValueError: If no valid images provided or conversion fails
+   
     """
     if not image_paths:
         raise ValueError("No image paths provided")

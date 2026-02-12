@@ -1,17 +1,11 @@
 import cv2
 
-# Minimum size for good OCR; smaller images are upscaled.
 MIN_OCR_HEIGHT = 600
 MIN_OCR_WIDTH = 600
 
 
 def preprocess_image(path):
-    """
-    OCR-only preprocessing.
-    Upscales small/low-res images so OCR can read text better.
-    Returns (ocr_image, (scale_x, scale_y)) so callers can map bbox coords
-    from ocr_image back to the original image.
-    """
+    
     img = cv2.imread(path, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("Image could not be loaded for OCR preprocessing")
