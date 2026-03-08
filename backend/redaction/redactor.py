@@ -20,19 +20,45 @@ def redact_polygon(img: np.ndarray, pts: list,
 
 def redact_boxes(img: np.ndarray,
                  boxes: List[List[List[int]]],
-                 color: Tuple[int, int, int] = (0, 0, 0)) -> np.ndarray:
+                 color: Tuple[int, int, int] = (0, 0, 0),
+                 partial: bool = False) -> np.ndarray:
     """
-    FULL REDACTION ONLY
+    Redact bounding boxes. Supports partial redaction (e.g., showing last 4 digits).
     """
 
     if not boxes:
         return img
 
     for box in boxes:
-        pts = [(int(x), int(y)) for x, y in box]
-        redact_polygon(img, pts, color)
+        # Convert to numpy array of coordinates
+        pts_array = np.array(box, dtype=np.int32)
+        
+        if partial:
+            # For partial redaction, we only black out the left ~70% of the bounding box
+            x_coords = pts_array[:, 0]
+            y_coords = pts_array[:, 1]
+            
+            x_min, x_max = np.min(x_coords), np.max(x_coords)
+            y_min, y_max = np.min(y_coords), np.max(y_coords)
+            
+            width = x_max - x_min
+            # Redact the first 70% of the width
+            redact_width = int(width * 0.7)
+            
+            partial_box = [
+                (x_min, y_min),
+                (x_min + redact_width, y_min),
+                (x_min + redact_width, y_max),
+                (x_min, y_max)
+            ]
+            redact_polygon(img, partial_box, color)
+        else:
+            # Full redaction
+            pts = [(int(x), int(y)) for x, y in box]
+            redact_polygon(img, pts, color)
 
-    print(f"✅ Fully redacted {len(boxes)} boxes")
+    msg = "Partially" if partial else "Fully"
+    print(f"✅ {msg} redacted {len(boxes)} boxes")
     return img
 
 

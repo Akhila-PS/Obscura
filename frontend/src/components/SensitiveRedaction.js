@@ -13,6 +13,7 @@ import {
   Checkbox,
   Paper,
   Button,
+  TextField,
 } from "@mui/material";
 import { motion } from "framer-motion";
 import Brightness4Icon from "@mui/icons-material/Brightness4";
@@ -27,16 +28,19 @@ import axios from "axios";
 
 function SensitiveRedaction({ mode, toggleColorMode }) {
   const navigate = useNavigate();
-  
+
   const [originalFile, setOriginalFile] = useState(null);
   const [redactedOutput, setRedactedOutput] = useState(null);
   const [outputType, setOutputType] = useState(null);
   const [riskScore, setRiskScore] = useState(null);
   const [explanations, setExplanations] = useState([]);
+  const [aiSummary, setAiSummary] = useState(null);
+  const [customPrompt, setCustomPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const [redactionOptions, setRedactionOptions] = useState({
+    general_pii: true,
     aadhaar: true,
     vid: true,
     phone: true,
@@ -68,18 +72,20 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
     const formData = new FormData();
     formData.append("image", file);
     formData.append("options", JSON.stringify(redactionOptions));
+    formData.append("custom_prompt", customPrompt);
 
     try {
-      const res = await axios.post("http://localhost:5000/upload", formData, {
+      const res = await axios.post("/upload", formData, {
         timeout: 120000,
       });
 
       setOutputType(res.data.type);
       setRiskScore(res.data.risk_score);
       setExplanations(res.data.explanations || []);
+      setAiSummary(res.data.ai_summary || null);
 
       if (res.data.type === "image") {
-        setRedactedOutput(`data:image/png;base64,${res.data.redacted_image}`);
+        setRedactedOutput(`data: image / png; base64, ${res.data.redacted_image} `);
       }
 
       if (res.data.type === "pdf") {
@@ -175,7 +181,7 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
             p: 4,
             mb: 4,
             borderRadius: 4,
-            background: mode === 'dark' 
+            background: mode === 'dark'
               ? 'linear-gradient(145deg, rgba(30,41,59,0.92) 0%, rgba(15,23,42,0.98) 100%)'
               : 'rgba(255,255,255,0.95)',
             border: '1px solid',
@@ -187,6 +193,16 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
           </Typography>
 
           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2 }}>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={redactionOptions.general_pii}
+                  onChange={() => handleOptionChange('general_pii')}
+                  color="primary"
+                />
+              }
+              label="General PII (IDs, DOBs, Expiry, etc)"
+            />
             <FormControlLabel
               control={
                 <Checkbox
@@ -281,6 +297,43 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
         </Paper>
       </motion.div>
 
+      {/* Smart Redaction Custom Rule */}
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.6, delay: 0.15 }}
+      >
+        <Paper
+          elevation={6}
+          sx={{
+            p: 4,
+            mb: 4,
+            borderRadius: 4,
+            background: mode === 'dark'
+              ? 'linear-gradient(145deg, rgba(30,41,59,0.92) 0%, rgba(15,23,42,0.98) 100%)'
+              : 'rgba(255,255,255,0.95)',
+            border: '1px solid',
+            borderColor: 'divider',
+          }}
+        >
+          <Typography variant="h6" gutterBottom sx={{ mb: 2 }}>
+            🤖 Smart AI Redaction (Optional)
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+            Use natural language to specify what else you want to redact (e.g., "Redact the patient's full name and address" or "Hide all mentions of Project Titan").
+          </Typography>
+          <TextField
+            fullWidth
+            multiline
+            rows={2}
+            variant="outlined"
+            placeholder="Type your custom redaction rule here..."
+            value={customPrompt}
+            onChange={(e) => setCustomPrompt(e.target.value)}
+          />
+        </Paper>
+      </motion.div>
+
       {/* Upload Card */}
       <motion.div
         initial={{ opacity: 0, scale: 0.96 }}
@@ -292,8 +345,8 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
             bgcolor: 'background.paper',
             borderRadius: 4,
             p: { xs: 4, md: 5 },
-            boxShadow: mode === 'dark' 
-              ? '0 15px 35px rgba(0,0,0,0.5)' 
+            boxShadow: mode === 'dark'
+              ? '0 15px 35px rgba(0,0,0,0.5)'
               : '0 15px 35px rgba(0,0,0,0.1)',
             border: '1px solid',
             borderColor: 'divider',
@@ -339,6 +392,7 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
             outputType={outputType}
             riskScore={riskScore}
             explanations={explanations}
+            aiSummary={aiSummary}
           />
         </motion.div>
       )}

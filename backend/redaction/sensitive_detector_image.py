@@ -155,7 +155,30 @@ def find_qr_codes(image_path):
 
     boxes = []
     
-    # Method 1: OpenCV QRCodeDetector
+    # Method 1: WeChatQRCode (Best for dense QR like E-Aadhaar and PDFs)
+    try:
+        import os
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        model_dir = os.path.join(base_dir, "models", "wechat_qrcode")
+        
+        if os.path.exists(os.path.join(model_dir, "detect.prototxt")):
+            wechat = cv2.wechat_qrcode_WeChatQRCode(
+                os.path.join(model_dir, "detect.prototxt"),
+                os.path.join(model_dir, "detect.caffemodel"),
+                os.path.join(model_dir, "sr.prototxt"),
+                os.path.join(model_dir, "sr.caffemodel")
+            )
+            res, points = wechat.detectAndDecode(img)
+            if points:
+                for point_set in points:
+                    pts = point_set.astype(int).tolist()
+                    if not any(np.array_equal(pts, existing) for existing in boxes):
+                        boxes.append(pts)
+                        print(f"      ✅ QR code detected via WeChatQRCode")
+    except Exception as e:
+        print(f"      ⚠️  WeChatQRCode failed: {e}")
+        
+    # Method 2: OpenCV QRCodeDetector
     try:
         detector = cv2.QRCodeDetector()
         data, bbox, _ = detector.detectAndDecode(img)
@@ -181,22 +204,34 @@ def find_qr_codes(image_path):
     except Exception as e:
         pass
     
-    # Method 3: Pyzbar fallback
+    # Method 4: Pyzbar fallback for standard codes
     try:
         from pyzbar import pyzbar
-        decoded_objects = pyzbar.decode(img)
         
-        for obj in decoded_objects:
-            points = obj.polygon
-            if len(points) == 4:
-                pts = [[p.x, p.y] for p in points]
-                if not any(np.array_equal(pts, existing) for existing in boxes):
-                    boxes.append(pts)
-            else:
-                x, y, w, h = obj.rect
-                pts = [[x, y], [x+w, y], [x+w, y+h], [x, y+h]]
-                if not any(np.array_equal(pts, existing) for existing in boxes):
-                    boxes.append(pts)
+        # Helper to scale and threshold
+        def try_pyzbar(image, boxes):
+            decoded_objects = pyzbar.decode(image)
+            found = False
+            for obj in decoded_objects:
+                points = obj.polygon
+                if len(points) == 4:
+                    pts = [[p.x, p.y] for p in points]
+                    if not any(np.array_equal(pts, existing) for existing in boxes):
+                        boxes.append(pts)
+                        found = True
+                else:
+                    x, y, w, h = obj.rect
+                    pts = [[x, y], [x+w, y], [x+w, y+h], [x, y+h]]
+                    if not any(np.array_equal(pts, existing) for existing in boxes):
+                        boxes.append(pts)
+                        found = True
+            return found
+            
+        if not try_pyzbar(img, boxes):
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            if not try_pyzbar(gray, boxes):
+                try_pyzbar(cv2.resize(gray, (0,0), fx=0.5, fy=0.5), boxes) # helpful for high-DPI
+                
     except ImportError:
         pass
     except Exception as e:
@@ -301,332 +336,4 @@ def _boxes_overlap(box1, box2, threshold=0.5):
     return iou > threshold
 
 
-# ============================================================================
-# AADHAAR (12 digits) - WITH VALIDATION
-# ============================================================================
-
-def find_aadhaar_boxes(ocr_results):
-    """
-    Detect Aadhaar numbers with format validation.
-    FIXED: Higher confidence threshold + format validation
-    """
-    boxes = []
-
-    for bbox, text, conf in ocr_results:
-        if conf < 0.3:  # ← INCREASED from 0.2
-            continue
-
-        # Skip if looks like a date
-        if is_likely_date(text):
-            continue
-
-        cleaned = clean_ocr_text(text)
-
-        # Exact 12 digits with validation
-        if re.fullmatch(r"\d{12}", cleaned):
-            if is_valid_aadhaar_format(cleaned):
-                boxes.append(bbox)
-                print(f"      ✅ Valid Aadhaar: {cleaned[:4]}********")
-
-    # If no exact match, try combining consecutive digit sequences
-    if not boxes:
-        boxes = find_aadhaar_boxes_combined(ocr_results)
-
-    if boxes:
-        print(f"✅ Aadhaar detected: {len(boxes)}")
-    else:
-        print(f"ℹ️  No Aadhaar numbers detected")
-
-    return boxes
-
-
-def find_aadhaar_boxes_combined(ocr_results):
-    """
-    Try to find Aadhaar by combining consecutive digit sequences.
-    """
-    boxes = []
-    digit_sequences = []
-
-    for bbox, text, conf in ocr_results:
-        if conf < 0.3:  # ← INCREASED from 0.2
-            continue
-
-        cleaned = clean_ocr_text(text)
-        if cleaned.isdigit() and len(cleaned) >= 3:
-            digit_sequences.append((bbox, cleaned))
-
-    # Try combining up to 4 consecutive sequences
-    for i in range(len(digit_sequences)):
-        combined = ""
-        combined_boxes = []
-
-        for j in range(i, min(i + 4, len(digit_sequences))):
-            combined += digit_sequences[j][1]
-            combined_boxes.append(digit_sequences[j][0])
-
-            if len(combined) == 12:
-                # Validate before adding
-                if is_valid_aadhaar_format(combined):
-                    boxes.extend(combined_boxes)
-                break
-            elif len(combined) > 12:
-                break
-
-    return boxes
-
-
-# ============================================================================
-# VID (16 digits)
-# ============================================================================
-
-def find_vid_boxes(ocr_results):
-    """
-    Detect VID (Virtual ID) - 16 digits.
-    FIXED: Higher confidence threshold
-    """
-    boxes = []
-
-    for bbox, text, conf in ocr_results:
-        if conf < 0.3:  # ← INCREASED from 0.2
-            continue
-
-        # Skip dates
-        if is_likely_date(text):
-            continue
-
-        cleaned = clean_ocr_text(text)
-
-        if re.fullmatch(r"\d{16}", cleaned) or re.fullmatch(r"\d{15}|\d{17}", cleaned):
-            boxes.append(bbox)
-
-    if boxes:
-        print(f"✅ VID detected: {len(boxes)}")
-    else:
-        print(f"ℹ️  No VID detected")
-
-    return boxes
-
-
-# ============================================================================
-# PAN CARD
-# ============================================================================
-
-def find_pan_boxes(ocr_results):
-    """
-    Detect PAN (Permanent Account Number).
-    Format: 5 letters + 4 digits + 1 letter (e.g., ABCDE1234F)
-    """
-    boxes = []
-    pattern = r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
-
-    for bbox, text, conf in ocr_results:
-        if conf < 0.4:  # ← INCREASED from 0.3
-            continue
-
-        cleaned = clean_ocr_text_alphanumeric(text)
-
-        if re.match(pattern, cleaned):
-            boxes.append(bbox)
-
-    if boxes:
-        print(f"✅ PAN cards detected: {len(boxes)}")
-    else:
-        print(f"ℹ️  No PAN cards detected")
-
-    return boxes
-
-
-# ============================================================================
-# PHONE (Indian) - FIXED: REMOVED FALLBACK LOGIC
-# ============================================================================
-
-def find_phone_boxes(ocr_results):
-    """
-    Detect Indian phone numbers (10 digits starting with 6-9).
-    FIXED: 
-    - Higher confidence threshold
-    - Removed aggressive fallback
-    - Added context checking
-    - Added date exclusion
-    """
-    boxes = []
-
-    # Build context map
-    for i, (bbox, text, conf) in enumerate(ocr_results):
-        if conf < 0.4:  # ← INCREASED from 0.15! Much stricter
-            continue
-
-        # Skip if looks like a date
-        if is_likely_date(text):
-            print(f"      ℹ️  Skipping date-like text: {text}")
-            continue
-
-        # Get context
-        context_before = ""
-        context_after = ""
-        if i > 0:
-            context_before = ocr_results[i-1][1]
-        if i < len(ocr_results) - 1:
-            context_after = ocr_results[i+1][1]
-
-        # Check for exclusion context (enrollment, DOB, etc.)
-        if has_exclusion_context(text, context_before, context_after):
-            print(f"      ℹ️  Skipping due to context: {text}")
-            continue
-
-        cleaned = clean_ocr_text(text)
-
-        # Only strict Indian mobile pattern (6-9 prefix)
-        if re.fullmatch(r"[6-9]\d{9}", cleaned):
-            boxes.append(bbox)
-            print(f"      ✅ Phone: {cleaned[:3]}*******")
-
-    # ❌ REMOVED: The aggressive fallback logic that caught enrollment numbers!
-    # No more "any 10 digits" matching!
-
-    if boxes:
-        print(f"✅ Phone numbers detected: {len(boxes)}")
-    else:
-        print(f"ℹ️  No phone numbers detected")
-
-    return boxes
-
-
-# ============================================================================
-# EMAIL
-# ============================================================================
-
-def find_email_boxes(ocr_results):
-    """
-    Detect email addresses.
-    FIXED: Higher confidence threshold
-    """
-    boxes = []
-    pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
-
-    for bbox, text, conf in ocr_results:
-        if conf >= 0.5 and re.search(pattern, text):  # ← INCREASED from 0.3
-            boxes.append(bbox)
-
-    if boxes:
-        print(f"✅ Emails detected: {len(boxes)}")
-    else:
-        print(f"ℹ️  No emails detected")
-
-    return boxes
-
-
-# ============================================================================
-# LICENSE PLATE
-# ============================================================================
-
-def find_license_plate_boxes(ocr_results):
-    """
-    Detect Indian license plates.
-    """
-    boxes = []
-    pattern = r'\b[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}\b'
-
-    for bbox, text, conf in ocr_results:
-        if conf < 0.4:
-            continue
-
-        cleaned = text.replace(" ", "").upper()
-
-        if re.search(pattern, cleaned):
-            boxes.append(bbox)
-
-    if boxes:
-        print(f"✅ License plates detected: {len(boxes)}")
-    else:
-        print(f"ℹ️  No license plates detected")
-
-    return boxes
-
-
-# ============================================================================
-# KEYWORDS
-# ============================================================================
-
-def find_keyword_boxes(ocr_results, keywords):
-    """
-    Detect custom keywords in text.
-    """
-    if not keywords:
-        return []
-
-    boxes = []
-    keyword_list = [k.strip().lower() for k in keywords.split(',')]
-
-    for bbox, text, conf in ocr_results:
-        if conf < 0.2:
-            continue
-
-        text_lower = text.lower()
-
-        if any(k in text_lower for k in keyword_list):
-            boxes.append(bbox)
-
-    if boxes:
-        print(f"✅ Keyword matches: {len(boxes)}")
-    else:
-        print(f"ℹ️  No keyword matches found")
-
-    return boxes
-
-
-# ============================================================================
-# EMERGENCY FALLBACK
-# ============================================================================
-
-def find_all_numbers_emergency(ocr_results):
-    """
-    Emergency fallback: detect any number sequence >= 4 digits.
-    Use when specific detection fails.
-    """
-    boxes = []
-
-    for bbox, text, conf in ocr_results:
-        if conf < 0.1:
-            continue
-
-        cleaned = clean_ocr_text(text)
-
-        if len(cleaned) >= 4 and cleaned.isdigit():
-            boxes.append(bbox)
-
-    if boxes:
-        print(f"⚠️  Emergency fallback - numbers detected: {len(boxes)}")
-    else:
-        print(f"ℹ️  No numbers detected in emergency fallback")
-
-    return boxes
-
-
-
- 
-
-def validate_detections(boxes, image_shape):
-    """
-    Validate bounding boxes are within image boundaries.
-    """
-    height, width = image_shape[:2]
-    valid_boxes = []
-    
-    for box in boxes:
-        try:
-            valid = True
-            for point in box:
-                x, y = point
-                if x < 0 or x > width or y < 0 or y > height:
-                    valid = False
-                    break
-            
-            if valid:
-                valid_boxes.append(box)
-            else:
-                print(f"⚠️  Invalid box coordinates detected and removed")
-        except Exception as e:
-            print(f"⚠️  Error validating box: {e}")
-    
-    return valid_boxes
+# End of file

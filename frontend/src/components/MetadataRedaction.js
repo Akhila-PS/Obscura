@@ -21,7 +21,7 @@ import axios from "axios";
 
 export default function MetadataRedaction() {
   const navigate = useNavigate();
-  
+
   const [file, setFile] = useState(null);
   const [originalPreview, setOriginalPreview] = useState(null);
   const [metadata, setMetadata] = useState({});
@@ -55,7 +55,7 @@ export default function MetadataRedaction() {
     formData.append("image", file);
 
     try {
-      const res = await axios.post("http://localhost:5000/metadata", formData, {
+      const res = await axios.post("/metadata", formData, {
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 60000,
       });
@@ -79,7 +79,7 @@ export default function MetadataRedaction() {
     formData.append("image", file);
 
     try {
-      const res = await axios.post("http://localhost:5000/strip-metadata", formData, {
+      const res = await axios.post("/strip-metadata", formData, {
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 60000,
       });
@@ -163,11 +163,11 @@ export default function MetadataRedaction() {
           id="metadata-upload"
         />
         <label htmlFor="metadata-upload">
-          <Button 
-            variant="contained" 
-            component="span" 
-            startIcon={<CloudUploadIcon />} 
-            size="large" 
+          <Button
+            variant="contained"
+            component="span"
+            startIcon={<CloudUploadIcon />}
+            size="large"
             sx={{ py: 2, px: 5 }}
           >
             Choose Image

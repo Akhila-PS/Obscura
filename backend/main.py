@@ -23,14 +23,8 @@ from preprocessing.image_cleaner import preprocess_image
 from ocr.printed_ocr import extract_printed_text
 
 from redaction.sensitive_detector_image import (
-    find_aadhaar_boxes,
-    find_vid_boxes,
-    find_pan_boxes,  
-    find_phone_boxes,
     find_qr_codes,
-    find_faces,
-    find_email_boxes,
-    find_license_plate_boxes,
+    find_faces
 )
 
 from redaction.redactor import (
@@ -41,6 +35,8 @@ from redaction.redactor import (
 
 from pdf.pdf_to_images import pdf_to_images
 from pdf.images_to_pdf import images_to_pdf
+
+from redaction.llm_processor import generate_redaction_summary, detect_custom_rules, detect_sensitive_entities_ai
 
 
 app = Flask(__name__)
@@ -69,9 +65,9 @@ def _scale_ocr_boxes(ocr_results, scale_x, scale_y):
 
 
 
-def process_image_with_options(image_path, output_path, options, source_type="image"):
+def process_image_with_options(image_path, output_path, options, custom_prompt="", source_type="image"):
     """
-    Process image with user-selected redaction options.
+    Process image with user-selected redaction options and optional custom rules.
     FIXED: Added comprehensive logging and PAN detection
     """
     print(f"\n{'='*70}")
@@ -89,6 +85,7 @@ def process_image_with_options(image_path, output_path, options, source_type="im
     print(f"✅ Input file exists ({file_size} bytes)")
     
     default_options = {
+        "general_pii": True,
         "aadhaar": True,
         "vid": True,
         "pan": True,     # ADDED
@@ -133,34 +130,7 @@ def process_image_with_options(image_path, output_path, options, source_type="im
     detection_results = []
     
     
-    if redaction_opts.get("aadhaar", True):
-        print(f"   🔍 Detecting Aadhaar numbers...")
-        aadhaar_boxes = find_aadhaar_boxes(ocr_results)
-        if aadhaar_boxes:
-           detection_results.append((aadhaar_boxes, "Aadhaar number", "redact"))
-        print(f"      ✅ Found {len(aadhaar_boxes)} Aadhaar number(s)")
-    
-    if redaction_opts.get("vid", True):
-        print(f"   🔍 Detecting VID...")
-        vid_boxes = find_vid_boxes(ocr_results)
-        if vid_boxes:
-            detection_results.append((vid_boxes, "VID", "redact"))
-            print(f"      ✅ Found {len(vid_boxes)} VID(s)")
-    
-    if redaction_opts.get("pan", True):
-        print(f"   🔍 Detecting PAN cards...")
-        pan_boxes = find_pan_boxes(ocr_results)
-        if pan_boxes:
-            detection_results.append((pan_boxes, "PAN card", "redact"))
-            print(f"      ✅ Found {len(pan_boxes)} PAN card(s)")
-    
-    if redaction_opts.get("phone", True):
-        print(f"   🔍 Detecting phone numbers...")
-        phone_boxes = find_phone_boxes(ocr_results)
-        if phone_boxes:
-            detection_results.append((phone_boxes, "Phone number", "redact"))
-            print(f"      ✅ Found {len(phone_boxes)} phone number(s)")
-    
+    # Vision-based (OpenCV/Haarcascades) detections
     if redaction_opts.get("qr", True):
         print(f"   🔍 Detecting QR codes...")
         qr_boxes = find_qr_codes(clean_path)
@@ -174,21 +144,39 @@ def process_image_with_options(image_path, output_path, options, source_type="im
         if face_boxes:
             detection_results.append((face_boxes, "Face", "blur"))
             print(f"      ✅ Found {len(face_boxes)} face(s)")
-    
 
-    if redaction_opts.get("email", False):
-        print(f"   🔍 Detecting emails...")
-        email_boxes = find_email_boxes(ocr_results)
-        if email_boxes:
-            detection_results.append((email_boxes, "Email address", "redact"))
-            print(f"      ✅ Found {len(email_boxes)} email(s)")
-    
-    if redaction_opts.get("plate", False):
-        print(f"   🔍 Detecting license plates...")
-        plate_boxes = find_license_plate_boxes(ocr_results)
-        if plate_boxes:
-            detection_results.append((plate_boxes, "License plate", "redact"))
-            print(f"      ✅ Found {len(plate_boxes)} license plate(s)")
+    # Text-based (LLM) detections
+    # Exclude vision items and custom rules from the list sent to the LLM
+    active_text_redactions = [k for k in active_redactions if k not in ["qr", "face", "watermark", "partial"]]
+
+    if active_text_redactions or (custom_prompt and custom_prompt.strip()):
+        print(f"   🔍 Detecting text entities via Unified LLM Redaction...")
+        
+        # We handle text redactions AND custom prompts in a single call now!
+        categorized_boxes = detect_sensitive_entities_ai(ocr_results, active_text_redactions, custom_prompt)
+        
+        for category, boxes in categorized_boxes.items():
+            if category == "custom":
+                label = "Custom Rule Match"
+            elif category == "general_pii":
+                label = "General PII (ID/DOB/Expiry)"
+            elif category == "aadhaar":
+                label = "Aadhaar number"
+            elif category == "vid":
+                label = "VID"
+            elif category == "pan":
+                label = "PAN card"
+            elif category == "phone":
+                label = "Phone number"
+            elif category == "email":
+                label = "Email address"
+            elif category == "plate":
+                label = "License plate"
+            else:
+                label = f"{category.capitalize()}"
+                
+            detection_results.append((boxes, label, "redact"))
+            print(f"      ✅ Found {len(boxes)} {label}(s)")
     
     print(f"\n📊 Detection Summary:")
     if detection_results:
@@ -217,8 +205,10 @@ def process_image_with_options(image_path, output_path, options, source_type="im
             
         
         else:
-            print(f"   ✅ Fully redacting {len(boxes)} {label}(s)...")
-            image = redact_boxes(image, boxes)
+            is_partial = redaction_opts.get("partial", False)
+            mode_str = "Partially" if is_partial else "Fully"
+            print(f"   ✅ {mode_str} redacting {len(boxes)} {label}(s)...")
+            image = redact_boxes(image, boxes, partial=is_partial)
             explanations.extend([f"{label} redacted"] * len(boxes))
     
     if redaction_opts.get("watermark", True):
@@ -245,7 +235,11 @@ def process_image_with_options(image_path, output_path, options, source_type="im
     print(f"✅ REDACTION COMPLETE - {len(explanations)} items redacted")
     print(f"{'='*70}\n")
     
-    return explanations
+    # Generate the AI summary before returning
+    ai_summary = generate_redaction_summary(ocr_results, detection_results, custom_prompt)
+    print(f"\n💬 AI Summary Generated: {ai_summary[:50]}...")
+    
+    return explanations, ai_summary
 
 
 @app.route("/upload", methods=["POST"])
@@ -274,6 +268,10 @@ def upload():
         except json.JSONDecodeError:
             print(f"⚠️  Invalid JSON in options, using defaults")
             options = {}
+            
+        custom_prompt = request.form.get("custom_prompt", "")
+        if custom_prompt:
+            print(f"📝 Custom prompt received: {custom_prompt}")
         
         filename = secure_filename(file.filename.lower())
         uid = uuid.uuid4().hex
@@ -297,8 +295,8 @@ def upload():
             print(f"\n🖼️  Processing as IMAGE...")
             output_path = os.path.join(UPLOAD_REDACTED, f"{name}_{uid}_redacted.png")
             
-            explanations = process_image_with_options(
-                original_path, output_path, options, source_type="image"
+            explanations, ai_summary = process_image_with_options(
+                original_path, output_path, options, custom_prompt, source_type="image"
             )
             
             with open(output_path, "rb") as f:
@@ -314,7 +312,8 @@ def upload():
                 "type": "image",
                 "risk_score": risk_score,
                 "explanations": explanations,
-                "redacted_image": encoded
+                "redacted_image": encoded,
+                "ai_summary": ai_summary
             })
         
         elif file_type == "application/pdf":
@@ -334,9 +333,12 @@ def upload():
                     
                     out_page = page.replace(".png", "_redacted.png")
                     
-                    page_explanations = process_image_with_options(
-                        page, out_page, options, source_type=f"pdf page {i}"
+                    page_explanations, page_ai_summary = process_image_with_options(
+                        page, out_page, options, custom_prompt, source_type=f"pdf page {i}"
                     )
+                    
+                    # For multi-page PDFs, we might just keep the summary of the last page, or concatenate
+                    ai_summary = page_ai_summary
                     
                     explanations.extend(page_explanations)
                     redacted_pages.append(out_page)
@@ -363,7 +365,8 @@ def upload():
                     "type": "pdf",
                     "risk_score": risk_score,
                     "explanations": explanations,
-                    "redacted_pdf": encoded
+                    "redacted_pdf": encoded,
+                    "ai_summary": ai_summary
                 })
             
             finally:
@@ -491,4 +494,4 @@ if __name__ == "__main__":
     print("   - POST /upload (Sensitive data redaction)")
     print("   - POST /metadata (Extract metadata)")
     print("   - POST /strip-metadata (Remove metadata)")
-    app.run(debug=True)
+    app.run(debug=False, host='0.0.0.0')
