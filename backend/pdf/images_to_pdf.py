@@ -1,32 +1,43 @@
+# pdf/images_to_pdf.py
 from PIL import Image
-from pdf2image import convert_from_path
 import os
 
-# Convert multiple images to a single PDF
+
 def images_to_pdf(image_paths, output_pdf):
-    images = [Image.open(p).convert("RGB") for p in image_paths]
-    if images:
+    """
+    Convert multiple images to a single PDF.
+    
+    
+        image_paths: 
+        output_pdf: 
+        
+   
+    """
+    if not image_paths:
+        raise ValueError("No image paths provided")
+    
+    images = []
+    
+    # Load all images, skip corrupted ones
+    for path in image_paths:
+        try:
+            img = Image.open(path).convert("RGB")
+            images.append(img)
+        except Exception as e:
+            print(f"⚠️  Failed to load image {path}: {e}")
+            continue
+    
+    if not images:
+        raise ValueError("No valid images could be loaded")
+    
+    # Save as PDF
+    try:
         images[0].save(
             output_pdf,
+            format="PDF",
             save_all=True,
-            append_images=images[1:]
+            append_images=images[1:] if len(images) > 1 else []
         )
-
-# Convert PDF to images
-def pdf_to_images(pdf_path, output_dir):
-    # Make sure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-
-    pages = convert_from_path(pdf_path, dpi=300)
-    image_paths = []
-
-    for i, page in enumerate(pages):
-        img_path = os.path.join(output_dir, f"page_{i+1}.png")
-        page.save(img_path, "PNG")
-        image_paths.append(img_path)
-
-    return image_paths
-
-# Example usage:
-# images_to_pdf(["img1.png", "img2.png"], "output.pdf")
-# pdf_to_images("output.pdf", "output_images")
+        print(f"✅ Created PDF with {len(images)} page(s)")
+    except Exception as e:
+        raise ValueError(f"Failed to create PDF: {e}") from e

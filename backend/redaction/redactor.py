@@ -1,101 +1,110 @@
+# redaction/redactor.py
+
+
 import cv2
 import numpy as np
+from typing import List, Tuple
+
+DEFAULT_BLUR_STRENGTH = 51
+MAX_BLUR_STRENGTH = 201
+MIN_BLUR_SIZE = 5
 
 
 
-# Import detectors for image and PDF
-from redaction.sensitive_detector_image import (
-    find_aadhaar_boxes as find_img_aadhaar,
-    find_phone_boxes as find_img_phone,
-    clean_ocr_text
-)
-from redaction.sensitive_detector_pdf import (
-    find_aadhaar_boxes as find_pdf_aadhaar,
-    find_phone_boxes as find_pdf_phone
-)
-
-
-# ---------------- BASIC REDACTION ----------------
-def redact_polygon(img, pts, color=(0, 0, 0)):
-    """Fill a polygon (bounding box) on the image with the given color."""
+def redact_polygon(img: np.ndarray, pts: list,
+                   color: Tuple[int, int, int] = (0, 0, 0)) -> np.ndarray:
     pts_array = np.array(pts, dtype=np.int32)
     cv2.fillPoly(img, [pts_array], color)
-
-
-def redact_boxes(img, boxes, color=(0, 0, 0)):
-    """Redact multiple bounding boxes on the image."""
-    for box in boxes:
-        if len(box) != 4:
-            continue  # skip invalid boxes
-        pts = [(int(x), int(y)) for x, y in box]
-        redact_polygon(img, pts, color)
     return img
 
 
-# ---------------- OCR-BASED CHECKS ----------------
-def should_redact_box(text, labels):
-    """Determine if a detected OCR text should be redacted."""
-    digits = ''.join(c for c in text if c.isdigit())
-    length = len(digits)
-
-    if "Aadhaar" in labels and length == 12:
-        return True
-    if "Phone Number" in labels and 10 <= length <= 13:
-        return True
-    if "Credit Card" in labels and length == 16:
-        return True
-    return False
-
-
-# ---------------- FULL REDACTION FUNCTION ----------------
-def redact_sensitive_text(image_path, ocr_results, source_type="image", output_path=None, color=(0, 0, 0)):
+def redact_boxes(img: np.ndarray,
+                 boxes: List[List[List[int]]],
+                 color: Tuple[int, int, int] = (0, 0, 0),
+                 partial: bool = False) -> np.ndarray:
     """
-    Redact sensitive data from an image (or PDF page).
-    - image_path: path to input image
-    - ocr_results: list of (bbox, text, confidence)
-    - source_type: "image" or "pdf"
-    - output_path: where to save redacted image
-    - color: redaction color (default black)
-    Returns list of explanations of what was redacted.
+    Redact bounding boxes. Supports partial redaction (e.g., showing last 4 digits).
     """
-    img = cv2.imread(image_path)
-    if img is None:
-        raise ValueError(f"Failed to read image: {image_path}")
 
-    explanations = []
+    if not boxes:
+        return img
 
-    # ---------------- DETECTION ----------------
-    if source_type == "pdf":
-        aadhaar_boxes = find_pdf_aadhaar(ocr_results)
-        phone_boxes = find_pdf_phone(ocr_results)
-    else:
-        aadhaar_boxes = find_img_aadhaar(ocr_results)
-        phone_boxes = find_img_phone(ocr_results)
+    for box in boxes:
+        # Convert to numpy array of coordinates
+        pts_array = np.array(box, dtype=np.int32)
+        
+        if partial:
+            # For partial redaction, we only black out the left ~70% of the bounding box
+            x_coords = pts_array[:, 0]
+            y_coords = pts_array[:, 1]
+            
+            x_min, x_max = np.min(x_coords), np.max(x_coords)
+            y_min, y_max = np.min(y_coords), np.max(y_coords)
+            
+            width = x_max - x_min
+            # Redact the first 70% of the width
+            redact_width = int(width * 0.7)
+            
+            partial_box = [
+                (x_min, y_min),
+                (x_min + redact_width, y_min),
+                (x_min + redact_width, y_max),
+                (x_min, y_max)
+            ]
+            redact_polygon(img, partial_box, color)
+        else:
+            # Full redaction
+            pts = [(int(x), int(y)) for x, y in box]
+            redact_polygon(img, pts, color)
 
-    # ---------------- REDACTION ----------------
-    img = redact_boxes(img, aadhaar_boxes, color)
-    explanations.extend(["Aadhaar detected"] * len(aadhaar_boxes))
+    msg = "Partially" if partial else "Fully"
+    print(f"✅ {msg} redacted {len(boxes)} boxes")
+    return img
 
-    img = redact_boxes(img, phone_boxes, color)
-    explanations.extend(["Phone number detected"] * len(phone_boxes))
 
-    # ---------------- OCR-BASED EXTRA REDACTION ----------------
-    for bbox, text, conf in ocr_results:
-        if conf < 0.3:
+
+
+def blur_boxes(img: np.ndarray,
+               boxes: List[List[List[int]]],
+               blur_strength: int = DEFAULT_BLUR_STRENGTH) -> np.ndarray:
+
+    if blur_strength % 2 == 0:
+        blur_strength += 1
+
+    blur_strength = min(blur_strength, MAX_BLUR_STRENGTH)
+
+    for box in boxes:
+        x_coords = [int(p[0]) for p in box]
+        y_coords = [int(p[1]) for p in box]
+
+        x, y = min(x_coords), min(y_coords)
+        x2, y2 = max(x_coords), max(y_coords)
+
+        w, h = x2 - x, y2 - y
+
+        if w < MIN_BLUR_SIZE or h < MIN_BLUR_SIZE:
             continue
-        clean_text = clean_ocr_text(text)
-        if should_redact_box(clean_text, ["Aadhaar"]):
-            img = redact_boxes(img, [bbox], color)
-            explanations.append("Aadhaar detected via OCR")
-        elif should_redact_box(clean_text, ["Phone Number"]):
-            img = redact_boxes(img, [bbox], color)
-            explanations.append("Phone number detected via OCR")
-        elif should_redact_box(clean_text, ["Credit Card"]):
-            img = redact_boxes(img, [bbox], color)
-            explanations.append("Credit card detected via OCR")
 
-    # ---------------- SAVE ----------------
-    if output_path:
-        cv2.imwrite(output_path, img)
+        roi = img[y:y+h, x:x+w]
+        img[y:y+h, x:x+w] = cv2.GaussianBlur(roi, (blur_strength, blur_strength), 0)
 
-    return explanations
+    print(f"✅ Blurred {len(boxes)} boxes")
+    return img
+
+
+
+
+def add_watermark(img: np.ndarray,
+                  text: str = "REDACTED - NOT FOR OFFICIAL USE") -> np.ndarray:
+
+    h, w = img.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    (tw, th), _ = cv2.getTextSize(text, font, 0.7, 2)
+
+    x = (w - tw) // 2
+    y = h - 20
+
+    cv2.putText(img, text, (x, y), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+    return img

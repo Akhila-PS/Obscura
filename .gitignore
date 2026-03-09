@@ -41,6 +41,11 @@ Thumbs.db
 *.bak
 *.swp
 
+# Local Netlify folder
+.netlify
+
+# Secrets
+.env
 # Don't commit large data files (unless you really need them)
 # *.pdf
 # *.png
