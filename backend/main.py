@@ -24,7 +24,11 @@ from ocr.printed_ocr import extract_printed_text
 
 from redaction.sensitive_detector_image import (
     find_qr_codes,
-    find_faces
+    find_faces,
+    find_aadhaar_boxes,
+    find_vid_boxes,
+    find_phone_boxes,
+    find_email_boxes,
 )
 
 from redaction.redactor import (
@@ -40,7 +44,32 @@ from redaction.llm_processor import generate_redaction_summary, detect_custom_ru
 
 
 app = Flask(__name__)
-CORS(app)
+
+# Explicitly allow every origin the browser extension runs on.
+# The extension's content script fetches from WhatsApp Web, Instagram,
+# Twitter/X, Facebook — all of which are https:// origins that a plain
+# CORS(app) does NOT whitelist by default.
+CORS(app, resources={r"/*": {
+    "origins": [
+        "https://web.whatsapp.com",
+        "https://www.instagram.com",
+        "https://twitter.com",
+        "https://x.com",
+        "https://www.facebook.com",
+        # Chrome extension pages (chrome-extension://<id>)
+        r"chrome-extension://*",
+        # Local dev / React frontend
+        "http://localhost:3000",
+        "http://localhost:5000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5000",
+        # Wildcard fallback so any extension ID works
+        "*",
+    ],
+    "methods": ["GET", "POST", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization"],
+    "supports_credentials": False,
+}})
 
 UPLOAD_ORIGINAL = "uploads/original"
 UPLOAD_REDACTED = "uploads/redacted"
@@ -65,7 +94,7 @@ def _scale_ocr_boxes(ocr_results, scale_x, scale_y):
 
 
 
-def process_image_with_options(image_path, output_path, options, custom_prompt="", source_type="image"):
+def process_image_with_options(image_path, output_path, options, custom_prompt="", source_type="image", manual_boxes=None):
     """
     Process image with user-selected redaction options and optional custom rules.
     FIXED: Added comprehensive logging and PAN detection
@@ -145,38 +174,66 @@ def process_image_with_options(image_path, output_path, options, custom_prompt="
             detection_results.append((face_boxes, "Face", "blur"))
             print(f"      ✅ Found {len(face_boxes)} face(s)")
 
-    # Text-based (LLM) detections
-    # Exclude vision items and custom rules from the list sent to the LLM
-    active_text_redactions = [k for k in active_redactions if k not in ["qr", "face", "watermark", "partial"]]
+    # ── LAYER 2: Regex detectors — always run, zero API dependency ─────────────
+    if redaction_opts.get("aadhaar", True):
+        aadhaar_boxes = find_aadhaar_boxes(ocr_results)
+        if aadhaar_boxes:
+            detection_results.append((aadhaar_boxes, "Aadhaar number", "redact"))
+            print(f"      ✅ Regex: {len(aadhaar_boxes)} Aadhaar number(s)")
 
-    if active_text_redactions or (custom_prompt and custom_prompt.strip()):
-        print(f"   🔍 Detecting text entities via Unified LLM Redaction...")
-        
-        # We handle text redactions AND custom prompts in a single call now!
-        categorized_boxes = detect_sensitive_entities_ai(ocr_results, active_text_redactions, custom_prompt)
-        
+    if redaction_opts.get("vid", True):
+        vid_boxes = find_vid_boxes(ocr_results)
+        if vid_boxes:
+            detection_results.append((vid_boxes, "VID", "redact"))
+            print(f"      ✅ Regex: {len(vid_boxes)} VID(s)")
+
+    if redaction_opts.get("phone", True):
+        phone_boxes = find_phone_boxes(ocr_results)
+        if phone_boxes:
+            detection_results.append((phone_boxes, "Phone number", "redact"))
+            print(f"      ✅ Regex: {len(phone_boxes)} phone number(s)")
+
+    if redaction_opts.get("email", False):
+        email_boxes = find_email_boxes(ocr_results)
+        if email_boxes:
+            detection_results.append((email_boxes, "Email address", "redact"))
+            print(f"      ✅ Regex: {len(email_boxes)} email address(es)")
+
+    # ── LAYER 3: LLM — general_pii, pan, plate, names, addresses, custom ───────
+    # NOTE: We do NOT do a second-pass LLM call for aadhaar/vid/phone/email
+    # because that doubles the per-page time with minimal benefit — regex
+    # already catches those reliably. LLM is only called for types regex
+    # cannot handle.
+    llm_types = [k for k in active_redactions
+                 if k not in ["qr", "face", "aadhaar", "vid", "phone", "email",
+                               "watermark", "partial"]]
+
+    # For PDF pages skip LLM entirely unless there is a custom prompt —
+    # this is the main cause of timeouts on multi-page PDFs
+    is_pdf_page = source_type.startswith("pdf page")
+    if is_pdf_page and not (custom_prompt and custom_prompt.strip()):
+        llm_types = []
+
+    if llm_types or (custom_prompt and custom_prompt.strip()):
+        print(f"   🧠 LLM detection for: {llm_types}")
+        categorized_boxes = detect_sensitive_entities_ai(ocr_results, llm_types, custom_prompt)
+
+        LABEL_MAP = {
+            "custom":      "Custom Rule Match",
+            "general_pii": "General PII (ID/DOB/Expiry)",
+            "aadhaar":     "Aadhaar number",
+            "vid":         "VID",
+            "pan":         "PAN card",
+            "phone":       "Phone number",
+            "email":       "Email address",
+            "plate":       "License plate",
+            "address":     "Address",
+            "name":        "Name",
+        }
         for category, boxes in categorized_boxes.items():
-            if category == "custom":
-                label = "Custom Rule Match"
-            elif category == "general_pii":
-                label = "General PII (ID/DOB/Expiry)"
-            elif category == "aadhaar":
-                label = "Aadhaar number"
-            elif category == "vid":
-                label = "VID"
-            elif category == "pan":
-                label = "PAN card"
-            elif category == "phone":
-                label = "Phone number"
-            elif category == "email":
-                label = "Email address"
-            elif category == "plate":
-                label = "License plate"
-            else:
-                label = f"{category.capitalize()}"
-                
+            label = LABEL_MAP.get(category, category.capitalize())
             detection_results.append((boxes, label, "redact"))
-            print(f"      ✅ Found {len(boxes)} {label}(s)")
+            print(f"      ✅ LLM: {len(boxes)} {label}(s)")
     
     print(f"\n📊 Detection Summary:")
     if detection_results:
@@ -211,6 +268,13 @@ def process_image_with_options(image_path, output_path, options, custom_prompt="
             image = redact_boxes(image, boxes, partial=is_partial)
             explanations.extend([f"{label} redacted"] * len(boxes))
     
+    # ── Manual boxes from extension draw-to-redact feature ──────────────────
+    if manual_boxes:
+        print(f"\n📋 Applying {len(manual_boxes)} manual redaction box(es)...")
+        image = redact_boxes(image, manual_boxes, partial=False)
+        explanations.extend(["Manual redaction"] * len(manual_boxes))
+        print(f"   ✅ Applied {len(manual_boxes)} manual box(es)")
+
     if redaction_opts.get("watermark", True):
         print(f"\n📋 Step 7: Adding watermark...")
         image = add_watermark(image, "REDACTED BY OBSCURA - NOT FOR OFFICIAL VERIFICATION")
@@ -235,11 +299,171 @@ def process_image_with_options(image_path, output_path, options, custom_prompt="
     print(f"✅ REDACTION COMPLETE - {len(explanations)} items redacted")
     print(f"{'='*70}\n")
     
-    # Generate the AI summary before returning
-    ai_summary = generate_redaction_summary(ocr_results, detection_results, custom_prompt)
-    print(f"\n💬 AI Summary Generated: {ai_summary[:50]}...")
-    
+    # Generate the AI summary — skip for PDF pages to avoid one Gemini call
+    # per page (causes timeouts). The /upload route generates it once at the end.
+    if source_type.startswith("pdf page"):
+        ai_summary = ""
+    else:
+        ai_summary = generate_redaction_summary(ocr_results, detection_results, custom_prompt)
+        print(f"\n💬 AI Summary Generated: {ai_summary[:50]}...")
+
     return explanations, ai_summary
+
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    """
+    Fast-scan endpoint used by the browser extension (content.js).
+    Runs OCR + regex detectors + metadata extraction and returns a
+    structured findings object WITHOUT applying any redaction.
+    The extension shows these findings to the user and then calls
+    /upload only if the user chooses to redact.
+
+    Returns JSON:
+    {
+        "scan_id":           str,          # unique id for this scan
+        "risk_score":        int,          # 0-100
+        "sensitive_findings": [str, ...],  # human-readable labels
+        "metadata_findings": {key: value}  # sensitive EXIF fields only
+    }
+    """
+    if "image" not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+
+    file = request.files["image"]
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    filename  = secure_filename(file.filename.lower())
+    uid       = uuid.uuid4().hex
+    name, ext = os.path.splitext(filename)
+    save_path = os.path.join(UPLOAD_ORIGINAL, f"{name}_{uid}{ext}")
+    file.save(save_path)
+
+    # Already-redacted file — return safe immediately
+    if file.filename.lower().startswith("redacted_"):
+        print("✅ /analyze: already-redacted file — returning safe")
+        return jsonify({
+            "scan_id":            uid,
+            "risk_score":         0,
+            "sensitive_findings": [],
+            "metadata_findings":  {},
+            "already_clean":      True,
+        })
+
+    sensitive_findings = []
+    metadata_findings  = {}
+
+    try:
+        # ── Metadata scan ────────────────────────────────────────────────────
+        try:
+            img      = Image.open(save_path)
+            exif_raw = img._getexif() or {}
+            SENS_TAGS = ['GPSInfo','Make','Model','DateTime','Software','Artist','Copyright']
+            for tag_id, value in exif_raw.items():
+                decoded = ExifTags.TAGS.get(tag_id, str(tag_id))
+                if decoded == "GPSInfo":
+                    gps = {}
+                    for gtag, gval in value.items():
+                        gps[ExifTags.GPSTAGS.get(gtag, gtag)] = str(gval)
+                    metadata_findings["GPSInfo"] = str(gps)
+                elif any(t in str(decoded) for t in SENS_TAGS):
+                    metadata_findings[decoded] = str(value)[:120]
+        except Exception:
+            pass  # Non-JPEG / no EXIF — perfectly fine
+
+        # ── OCR + regex scan ─────────────────────────────────────────────────
+        try:
+            # Detect PDF reliably — check MIME type, magic bytes, then extension.
+            # WhatsApp Web often sends PDFs with no extension in the filename,
+            # so extension-only check is not enough.
+            def _is_pdf_file(path, flask_file):
+                # 1. Flask MIME type (most reliable when set by browser)
+                mime = getattr(flask_file, 'mimetype', '') or ''
+                if mime == 'application/pdf':
+                    return True
+                # 2. Magic bytes — every PDF starts with %PDF
+                try:
+                    with open(path, 'rb') as _f:
+                        return _f.read(4) == b'%PDF'
+                except Exception:
+                    pass
+                # 3. Extension fallback
+                return path.lower().endswith('.pdf')
+
+            is_pdf = _is_pdf_file(save_path, file)
+            print(f"[analyze] is_pdf={is_pdf} mime={getattr(file,'mimetype','')} file={save_path}")
+
+            # Build list of image paths to scan —
+            # for PDFs convert every page to an image first,
+            # for images just use the file directly (after metadata strip)
+            images_to_scan = []
+
+            if is_pdf:
+                pdf_scan_dir = save_path + "_pages"
+                os.makedirs(pdf_scan_dir, exist_ok=True)
+                try:
+                    page_paths = pdf_to_images(save_path, pdf_scan_dir)
+                    images_to_scan = page_paths
+                    print(f"[analyze] PDF split into {len(page_paths)} page(s)")
+                except Exception as pdf_err:
+                    print(f"[analyze] PDF conversion error: {pdf_err}")
+            else:
+                clean_path = save_path + "_clean.png"
+                remove_metadata(save_path, clean_path)
+                images_to_scan = [clean_path]
+
+            # Scan every page / image
+            for img_path in images_to_scan:
+                try:
+                    ocr_ready, (sx, sy) = preprocess_image(img_path)
+                    ocr_results = extract_printed_text(ocr_ready)
+                    ocr_results = _scale_ocr_boxes(ocr_results, sx, sy)
+
+                    if find_aadhaar_boxes(ocr_results) and "Aadhaar number detected" not in sensitive_findings:
+                        sensitive_findings.append("Aadhaar number detected")
+                    if find_vid_boxes(ocr_results) and "VID (Virtual ID) detected" not in sensitive_findings:
+                        sensitive_findings.append("VID (Virtual ID) detected")
+                    if find_phone_boxes(ocr_results) and "Phone number detected" not in sensitive_findings:
+                        sensitive_findings.append("Phone number detected")
+                    if find_email_boxes(ocr_results) and "Email address detected" not in sensitive_findings:
+                        sensitive_findings.append("Email address detected")
+                    if find_qr_codes(img_path) and "QR code detected" not in sensitive_findings:
+                        sensitive_findings.append("QR code detected")
+
+                except Exception as page_err:
+                    print(f"[analyze] page scan error for {img_path} (non-fatal): {page_err}")
+
+            # Clean up all temp files
+            for img_path in images_to_scan:
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+            if is_pdf:
+                pdf_scan_dir_path = save_path + "_pages"
+                if os.path.exists(pdf_scan_dir_path):
+                    shutil.rmtree(pdf_scan_dir_path, ignore_errors=True)
+
+        except Exception as ocr_err:
+            print(f"[analyze] OCR/regex scan error (non-fatal): {ocr_err}")
+            traceback.print_exc()
+
+        # ── Risk score ───────────────────────────────────────────────────────
+        risk_score = min(
+            len(sensitive_findings) * 25 + len(metadata_findings) * 10,
+            100
+        )
+
+        return jsonify({
+            "scan_id":            uid,
+            "risk_score":         risk_score,
+            "sensitive_findings": sensitive_findings,
+            "metadata_findings":  metadata_findings,
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/upload", methods=["POST"])
@@ -272,6 +496,15 @@ def upload():
         custom_prompt = request.form.get("custom_prompt", "")
         if custom_prompt:
             print(f"📝 Custom prompt received: {custom_prompt}")
+
+        # Manual boxes from extension draw-to-redact
+        manual_boxes_json = request.form.get("manual_boxes", "[]")
+        try:
+            manual_boxes = json.loads(manual_boxes_json)
+            if manual_boxes:
+                print(f"📝 Manual boxes received: {len(manual_boxes)} box(es)")
+        except (json.JSONDecodeError, ValueError):
+            manual_boxes = []
         
         filename = secure_filename(file.filename.lower())
         uid = uuid.uuid4().hex
@@ -281,7 +514,26 @@ def upload():
         original_path = os.path.join(UPLOAD_ORIGINAL, saved_name)
         file.save(original_path)
         print(f"📥 File saved: {filename} → {saved_name}")
-        
+
+        # ── Already-redacted file guard ───────────────────────────────────────
+        # If the filename starts with "redacted_" the user is re-uploading a
+        # file we already processed. Return a zero-risk "safe" response
+        # immediately without re-scanning so the UI shows "No sensitive data".
+        orig_name_lower = file.filename.lower()
+        if orig_name_lower.startswith("redacted_"):
+            print(f"✅ Already-redacted file detected — returning safe response")
+            # Still encode the image so the UI can display it
+            with open(original_path, "rb") as rf:
+                encoded_safe = base64.b64encode(rf.read()).decode()
+            return jsonify({
+                "type": "image",
+                "risk_score": 0,
+                "explanations": [],
+                "redacted_image": encoded_safe,
+                "ai_summary": "This file has already been redacted by Obscura. No sensitive data was detected.",
+                "already_clean": True,
+            })
+
         file_type, _ = mimetypes.guess_type(original_path)
         if not file_type:
             print(f"❌ ERROR: Unsupported file type")
@@ -296,7 +548,8 @@ def upload():
             output_path = os.path.join(UPLOAD_REDACTED, f"{name}_{uid}_redacted.png")
             
             explanations, ai_summary = process_image_with_options(
-                original_path, output_path, options, custom_prompt, source_type="image"
+                original_path, output_path, options, custom_prompt,
+                source_type="image", manual_boxes=manual_boxes
             )
             
             with open(output_path, "rb") as f:
@@ -334,11 +587,10 @@ def upload():
                     out_page = page.replace(".png", "_redacted.png")
                     
                     page_explanations, page_ai_summary = process_image_with_options(
-                        page, out_page, options, custom_prompt, source_type=f"pdf page {i}"
+                        page, out_page, options, custom_prompt,
+                        source_type=f"pdf page {i}",
+                        manual_boxes=manual_boxes if i == 1 else None
                     )
-                    
-                    # For multi-page PDFs, we might just keep the summary of the last page, or concatenate
-                    ai_summary = page_ai_summary
                     
                     explanations.extend(page_explanations)
                     redacted_pages.append(out_page)
@@ -346,6 +598,12 @@ def upload():
                 final_pdf = os.path.join(UPLOAD_REDACTED, f"redacted_{uid}.pdf")
                 print(f"\n📄 Creating final PDF: {final_pdf}")
                 images_to_pdf(redacted_pages, final_pdf)
+
+                # Generate ONE AI summary for the whole PDF after all pages processed
+                try:
+                    ai_summary = generate_redaction_summary([], [], custom_prompt) if explanations else "No sensitive data was found in this PDF."
+                except Exception:
+                    ai_summary = f"Redaction complete. {len(explanations)} item(s) redacted across {len(pages)} page(s)." 
                 
                 if os.path.exists(final_pdf):
                     pdf_size = os.path.getsize(final_pdf)

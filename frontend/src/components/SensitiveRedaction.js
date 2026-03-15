@@ -19,6 +19,7 @@ import { motion } from "framer-motion";
 import Brightness4Icon from "@mui/icons-material/Brightness4";
 import Brightness7Icon from "@mui/icons-material/Brightness7";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { useNavigate } from "react-router-dom";
 
@@ -38,6 +39,7 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
   const [customPrompt, setCustomPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [hasProcessed, setHasProcessed] = useState(false);
 
   const [redactionOptions, setRedactionOptions] = useState({
     general_pii: true,
@@ -65,8 +67,21 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
       return;
     }
 
+    // Already-redacted file — show safe immediately, skip backend
+    if (file.name.toLowerCase().startsWith("redacted_")) {
+      setOriginalFile(URL.createObjectURL(file));
+      setExplanations([]);
+      setRiskScore(0);
+      setAiSummary("This file has already been redacted by Obscura. No sensitive data detected.");
+      setOutputType(null);
+      setRedactedOutput(null);
+      setHasProcessed(true);
+      return;
+    }
+
     setLoading(true);
     setError(null);
+    setHasProcessed(false);
     setOriginalFile(URL.createObjectURL(file));
 
     const formData = new FormData();
@@ -75,17 +90,24 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
     formData.append("custom_prompt", customPrompt);
 
     try {
-      const res = await axios.post("/upload", formData, {
-        timeout: 120000,
+      const isPdf = file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf";
+      const res = await axios.post("http://localhost:5000/upload", formData, {
+        timeout: isPdf ? 600000 : 180000,
       });
 
       setOutputType(res.data.type);
       setRiskScore(res.data.risk_score);
       setExplanations(res.data.explanations || []);
       setAiSummary(res.data.ai_summary || null);
+      setHasProcessed(true);
+
+      if (res.data.already_clean) {
+        setRedactedOutput(null);
+        return;
+      }
 
       if (res.data.type === "image") {
-        setRedactedOutput(`data: image / png; base64, ${res.data.redacted_image} `);
+        setRedactedOutput(`data:image/png;base64,${res.data.redacted_image}`);
       }
 
       if (res.data.type === "pdf") {
@@ -363,7 +385,10 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
             <Box mt={4}>
               <CircularProgress size={50} thickness={5} />
               <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                Processing your file...
+                Processing your file…
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1, fontSize: '0.75rem', opacity: 0.7 }}>
+                PDFs may take a minute per page
               </Typography>
             </Box>
           )}
@@ -378,7 +403,41 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
         </motion.div>
       )}
 
-      {redactedOutput && (
+      {hasProcessed && explanations.length === 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: 30 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.7, delay: 0.3 }}
+        >
+          <Divider sx={{ my: 8, borderColor: 'divider' }} />
+          <Paper
+            elevation={8}
+            sx={{
+              p: 6,
+              borderRadius: 4,
+              textAlign: 'center',
+              background: mode === 'dark'
+                ? 'linear-gradient(145deg, rgba(30,41,59,0.92) 0%, rgba(15,23,42,0.98) 100%)'
+                : 'rgba(255,255,255,0.95)',
+              border: '1px solid rgba(34,197,94,0.3)',
+              backdropFilter: 'blur(12px)',
+            }}
+          >
+            <CheckCircleOutlineIcon sx={{ fontSize: 80, color: '#22c55e', mb: 3 }} />
+            <Typography variant="h4" gutterBottom sx={{ fontWeight: 700, color: '#22c55e' }}>
+              No Sensitive Data Found
+            </Typography>
+            <Typography variant="h6" sx={{ mb: 2, color: '#94a3b8' }}>
+              This document is safe
+            </Typography>
+            <Typography variant="body1" sx={{ color: '#cbd5e1', fontSize: '1.05rem' }}>
+              {aiSummary || "No redaction needed — no Aadhaar, phone numbers, QR codes, or other sensitive information was detected."}
+            </Typography>
+          </Paper>
+        </motion.div>
+      )}
+
+      {hasProcessed && explanations.length > 0 && redactedOutput && (
         <motion.div
           initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}

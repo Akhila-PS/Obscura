@@ -8,15 +8,6 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 
 function ResultsSection({ originalFile, redactedOutput, outputType, riskScore, explanations, aiSummary }) {
 
-  // Add debugging
-  console.log("ResultsSection props:", {
-    hasOriginal: !!originalFile,
-    hasRedacted: !!redactedOutput,
-    outputType,
-    riskScore,
-    explanationsCount: explanations?.length || 0
-  });
-
   return (
     <Box sx={{ mt: 6 }}>
       <Typography variant="h4" sx={{ mb: 3, textAlign: 'center', fontWeight: 700 }}>
@@ -95,12 +86,12 @@ function ResultsSection({ originalFile, redactedOutput, outputType, riskScore, e
             </Typography>
 
             {outputType === 'pdf' ? (
-              <embed
-                src={originalFile}
-                type="application/pdf"
+              <iframe
+                src={originalFile + "#zoom=page-fit&toolbar=0"}
                 width="100%"
                 height="600px"
-                style={{ border: '1px solid #ccc', borderRadius: '8px' }}
+                style={{ border: '1px solid #ccc', borderRadius: '8px', display: 'block' }}
+                title="Original PDF"
               />
             ) : (
               <img
@@ -116,7 +107,7 @@ function ResultsSection({ originalFile, redactedOutput, outputType, riskScore, e
           </Paper>
         </motion.div>
 
-        {/* REDACTED FILE - FIXED: Now uses redactedOutput for PDF too */}
+        {/* REDACTED FILE */}
         <motion.div
           initial={{ opacity: 0, x: 30 }}
           animate={{ opacity: 1, x: 0 }}
@@ -137,15 +128,12 @@ function ResultsSection({ originalFile, redactedOutput, outputType, riskScore, e
             </Typography>
 
             {outputType === 'pdf' ? (
-              <embed
-                src={redactedOutput}
-                type="application/pdf"
-                style={{
-                  width: "100%",
-                  height: "600px",  // Match original height
-                  border: "1px solid #ccc",
-                  borderRadius: "8px"
-                }}
+              <iframe
+                src={redactedOutput + "#zoom=page-fit&toolbar=0"}
+                width="100%"
+                height="600px"
+                style={{ border: '1px solid #ccc', borderRadius: '8px', display: 'block' }}
+                title="Redacted PDF"
               />
             ) : (
               <img
@@ -201,7 +189,7 @@ function ResultsSection({ originalFile, redactedOutput, outputType, riskScore, e
           </Box>
         )
       }
-    </Box >
+    </Box>
   );
 }
 

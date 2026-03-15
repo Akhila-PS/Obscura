@@ -188,42 +188,58 @@ def detect_sensitive_entities_ai(ocr_results, active_redactions, custom_prompt="
         
     document_content = "\n".join(indexed_text)
     
+    ENTITY_DESCRIPTIONS = {
+        "aadhaar":     "- aadhaar: Indian Aadhaar number — a 12-digit unique identity number, often printed in groups of 4 digits separated by spaces or dashes (e.g. '1234 5678 9012' or '1234-5678-9012'). May be preceded by labels like 'Aadhaar No', 'UID', 'आधार' etc.",
+        "vid":         "- vid: Indian Virtual ID (VID) — a 16-digit temporary revocable number linked to Aadhaar, printed in groups of 4 (e.g. '1234 5678 9012 3456'). May be preceded by label 'VID'.",
+        "pan":         "- pan: Indian PAN card number — a 10-character alphanumeric code in the format AAAAA9999A (5 letters, 4 digits, 1 letter), e.g. 'ABCDE1234F'. May be preceded by 'PAN', 'Permanent Account Number'.",
+        "phone":       "- phone: Indian mobile or phone number — 10 digits starting with 6, 7, 8 or 9 (e.g. '9876543210'), optionally prefixed with +91 or 0. May be labeled 'Mobile', 'Phone', 'Contact', 'Tel' etc.",
+        "email":       "- email: Email address in standard format user@domain.com, e.g. 'john.doe@gmail.com'.",
+        "plate":       "- plate: Indian vehicle license plate / registration number, e.g. 'KL 01 AB 1234' or 'MH12AB1234'.",
+        "general_pii": "- general_pii: Any other Personally Identifiable Information including: full names (first + last name together), home addresses, dates of birth (DOB) in any format (DD/MM/YYYY, Month DD YYYY etc.), passport numbers, voter ID numbers, driving licence numbers, bank account numbers, IFSC codes, credit/debit card numbers, and expiry dates on ID cards.",
+        "address":     "- address: Physical home or office address including house number, street name, city, state, PIN code.",
+        "name":        "- name: Full personal name (first name + last name or as printed on an ID document).",
+    }
+
     redaction_goals = []
     for r in active_redactions:
-        if r == "general_pii":
-            redaction_goals.append("- general_pii: General Personally Identifiable Information (Driver's License IDs, Passport Numbers, Dates of Birth, Expiry Dates, Social Security Numbers, etc.)")
+        if r in ENTITY_DESCRIPTIONS:
+            redaction_goals.append(ENTITY_DESCRIPTIONS[r])
         else:
-            redaction_goals.append(f"- {r}")
-            
+            redaction_goals.append(f"- {r}: Any text matching or related to '{r}'.")
+
     goals_str = "\n".join(redaction_goals)
     
     custom_instruction = ""
     if custom_prompt.strip():
         custom_instruction = f"\nAdditionally, follow this custom user rule: '{custom_prompt}'"
     
-    prompt = f"""
-    You are an intelligent data redaction assistant.
-    
-    Below is the text extracted from a document via OCR. Each line has an index number in brackets, followed by the text.
-    
-    Your task is to identify which indices contain text that should be redacted based on the requested entity types.
-    
-    Requested Entity Types to Redact:
-    {goals_str}
-    {custom_instruction}
-    
-    OCR Text:
-    '''
-    {document_content}
-    '''
-    
-    Analyze the text. Return ONLY a valid JSON object where keys are the identified entity types (e.g., 'aadhaar', 'phone', 'email', 'custom') 
-    and values are arrays of the integer indices that should be redacted for that type.
-    
-    Do not return any markdown formatting, backticks, or other text. Just the JSON object.
-    If nothing matches, return an empty object: {{}}
-    Example output format: {{"aadhaar": [3, 4], "phone": [12], "custom": [15, 16]}}
-    """
+    prompt = f"""You are a precise data redaction engine for an Indian document privacy tool called Obscura.
+
+You will be given OCR-extracted text from a document (each line is numbered with an index in brackets).
+Your job is to find ALL lines that contain sensitive data matching the requested entity types below.
+
+ENTITY TYPES TO DETECT AND REDACT:
+{goals_str}
+{custom_instruction}
+
+IMPORTANT RULES:
+- Be liberal in detection: if a line MIGHT contain sensitive data of the requested type, include it.
+- For Aadhaar: OCR may split the number across lines, or add extra spaces/characters. Look for any sequence of 12 digits (possibly with spaces/dashes between groups of 4).
+- For names and addresses: include ALL lines that are part of the name or address, even if spread across multiple lines.
+- For dates of birth: look for any date format (DD/MM/YYYY, Month YYYY, etc.) near labels like "DOB", "Date of Birth", "Born", "जन्म तिथि".
+- For general_pii: cast a wide net — include names, addresses, DOBs, ID numbers, account numbers.
+- Include the label/header line too if it directly identifies sensitive data (e.g. a line that says "Aadhaar No:" right before the number).
+
+OCR TEXT (index: content):
+{document_content}
+
+Return ONLY a valid JSON object. Keys must be the entity type strings from the list above (e.g. "aadhaar", "phone", "general_pii").
+Values must be arrays of integer indices of lines to redact.
+No markdown, no backticks, no explanation — raw JSON only.
+If nothing matches a type, omit that key.
+If nothing matches at all, return: {{}}
+
+Example: {{"aadhaar": [3, 4], "phone": [12], "general_pii": [1, 2, 7]}}"""
     
     try:
         print(f"🧠 Running Unified AI Redaction for {len(active_redactions)} standard types and custom rules... (Calling Gemini)")
