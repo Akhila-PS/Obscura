@@ -60,7 +60,7 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
       [key]: !prev[key],
     }));
   };
-
+  const API = process.env.REACT_APP_API_URL || "http://localhost:5000";
   const handleUpload = async (file) => {
     if (!file) {
       setError("No file selected.");
@@ -91,7 +91,7 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
 
     try {
       const isPdf = file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf";
-      const res = await axios.post("http://localhost:5000/upload", formData, {
+      const res = await axios.post("${API}/upload", formData, {
         timeout: isPdf ? 600000 : 180000,
       });
 

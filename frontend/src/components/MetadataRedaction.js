@@ -31,7 +31,7 @@ export default function MetadataRedaction() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
-
+  const API = process.env.REACT_APP_API_URL || "http://localhost:5000";
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
     if (selectedFile) {
@@ -55,7 +55,7 @@ export default function MetadataRedaction() {
     formData.append("image", file);
 
     try {
-      const res = await axios.post("http://localhost:5000/metadata", formData, {
+      const res = await axios.post("${API}/metadata", formData, {
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 60000,
       });
@@ -79,7 +79,7 @@ export default function MetadataRedaction() {
     formData.append("image", file);
 
     try {
-      const res = await axios.post("http://localhost:5000/strip-metadata", formData, {
+      const res = await axios.post("${API}/strip-metadata", formData, {
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 60000,
       });
