@@ -11,6 +11,7 @@ import uuid
 import traceback
 import shutil
 import json
+import tempfile
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -71,12 +72,8 @@ CORS(app, resources={r"/*": {
     "supports_credentials": False,
 }})
 
-UPLOAD_ORIGINAL = "uploads/original"
-UPLOAD_REDACTED = "uploads/redacted"
-UPLOAD_TEMP = "uploads/temp_pages"
-
-for d in [UPLOAD_ORIGINAL, UPLOAD_REDACTED, UPLOAD_TEMP]:
-    os.makedirs(d, exist_ok=True)
+# No persistent upload folders — all processing uses temp files deleted after use
+# This ensures zero data retention: files exist only during active processing
 
 
 def _scale_ocr_boxes(ocr_results, scale_x, scale_y):
@@ -335,13 +332,9 @@ def analyze():
     if not file.filename:
         return jsonify({"error": "Empty filename"}), 400
 
-    filename  = secure_filename(file.filename.lower())
-    uid       = uuid.uuid4().hex
-    name, ext = os.path.splitext(filename)
-    save_path = os.path.join(UPLOAD_ORIGINAL, f"{name}_{uid}{ext}")
-    file.save(save_path)
+    uid = uuid.uuid4().hex
 
-    # Already-redacted file — return safe immediately
+    # Already-redacted file — return safe immediately, no disk needed
     if file.filename.lower().startswith("redacted_"):
         print("✅ /analyze: already-redacted file — returning safe")
         return jsonify({
@@ -351,6 +344,13 @@ def analyze():
             "metadata_findings":  {},
             "already_clean":      True,
         })
+
+    # Save to a temp file — deleted automatically when processing finishes
+    suffix = os.path.splitext(secure_filename(file.filename.lower()))[1] or ".bin"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    file.save(tmp.name)
+    tmp.close()
+    save_path = tmp.name
 
     sensitive_findings = []
     metadata_findings  = {}
@@ -464,6 +464,15 @@ def analyze():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+    finally:
+        # Always delete the temp file — zero retention
+        if 'save_path' in dir() or 'save_path' in locals():
+            try:
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                    print(f"🗑️  Temp file deleted: {save_path}")
+            except Exception:
+                pass
 
 
 @app.route("/upload", methods=["POST"])
@@ -509,22 +518,13 @@ def upload():
         filename = secure_filename(file.filename.lower())
         uid = uuid.uuid4().hex
         name, ext = os.path.splitext(filename)
-        saved_name = f"{name}_{uid}{ext}"
-        
-        original_path = os.path.join(UPLOAD_ORIGINAL, saved_name)
-        file.save(original_path)
-        print(f"📥 File saved: {filename} → {saved_name}")
 
         # ── Already-redacted file guard ───────────────────────────────────────
-        # If the filename starts with "redacted_" the user is re-uploading a
-        # file we already processed. Return a zero-risk "safe" response
-        # immediately without re-scanning so the UI shows "No sensitive data".
         orig_name_lower = file.filename.lower()
         if orig_name_lower.startswith("redacted_"):
             print(f"✅ Already-redacted file detected — returning safe response")
-            # Still encode the image so the UI can display it
-            with open(original_path, "rb") as rf:
-                encoded_safe = base64.b64encode(rf.read()).decode()
+            file_bytes = file.read()
+            encoded_safe = base64.b64encode(file_bytes).decode()
             return jsonify({
                 "type": "image",
                 "risk_score": 0,
@@ -534,26 +534,66 @@ def upload():
                 "already_clean": True,
             })
 
-        file_type, _ = mimetypes.guess_type(original_path)
+        # Save to temp file — deleted after response is sent
+        suffix = ext or ".bin"
+        tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        file.save(tmp_in.name)
+        tmp_in.close()
+        original_path = tmp_in.name
+        print(f"📥 File saved to temp: {original_path}")
+
+        # Detect file type robustly — mimetypes.guess_type fails when the
+        # filename has no extension (common when uploading via WhatsApp/browsers).
+        # Use magic bytes first, then Flask mimetype, then mimetypes as fallback.
+        def _detect_file_type(path, flask_file):
+            # 1. Magic bytes — most reliable
+            try:
+                with open(path, 'rb') as _f:
+                    header = _f.read(8)
+                if header[:4] == b'%PDF':
+                    return 'application/pdf'
+                if header[:8] in (b'\x89PNG\r\n\x1a\n',):
+                    return 'image/png'
+                if header[:3] == b'\xff\xd8\xff':
+                    return 'image/jpeg'
+                if header[:6] in (b'GIF87a', b'GIF89a'):
+                    return 'image/gif'
+                if header[:4] == b'RIFF' or header[:4] == b'WEBP':
+                    return 'image/webp'
+            except Exception:
+                pass
+            # 2. Flask mimetype
+            mt = getattr(flask_file, 'mimetype', '') or ''
+            if mt and mt != 'application/octet-stream':
+                return mt
+            # 3. Extension fallback
+            guessed, _ = mimetypes.guess_type(path)
+            return guessed or ''
+
+        file_type = _detect_file_type(original_path, file)
         if not file_type:
             print(f"❌ ERROR: Unsupported file type")
             return jsonify({"error": "Unsupported file type"}), 400
-        
+
         print(f"📄 File type: {file_type}")
         
         explanations = []
         
         if file_type.startswith("image"):
             print(f"\n🖼️  Processing as IMAGE...")
-            output_path = os.path.join(UPLOAD_REDACTED, f"{name}_{uid}_redacted.png")
-            
+            tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            tmp_out.close()
+            output_path = tmp_out.name
+
             explanations, ai_summary = process_image_with_options(
                 original_path, output_path, options, custom_prompt,
                 source_type="image", manual_boxes=manual_boxes
             )
-            
+
             with open(output_path, "rb") as f:
                 encoded = base64.b64encode(f.read()).decode()
+            os.remove(output_path)
+            print(f"🗑️  Temp output deleted: {output_path}")
             
             risk_score = min(len(explanations) * 20, 100)
             
@@ -571,8 +611,7 @@ def upload():
         
         elif file_type == "application/pdf":
             print(f"\n📄 Processing as PDF...")
-            temp_dir = os.path.join(UPLOAD_TEMP, uid)
-            os.makedirs(temp_dir, exist_ok=True)
+            temp_dir = tempfile.mkdtemp()
             
             try:
                 pages = pdf_to_images(original_path, temp_dir)
@@ -595,7 +634,9 @@ def upload():
                     explanations.extend(page_explanations)
                     redacted_pages.append(out_page)
                 
-                final_pdf = os.path.join(UPLOAD_REDACTED, f"redacted_{uid}.pdf")
+                tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+                tmp_pdf.close()
+                final_pdf = tmp_pdf.name
                 print(f"\n📄 Creating final PDF: {final_pdf}")
                 images_to_pdf(redacted_pages, final_pdf)
 
@@ -611,7 +652,9 @@ def upload():
                 
                 with open(final_pdf, "rb") as f:
                     encoded = base64.b64encode(f.read()).decode()
-                
+                os.remove(final_pdf)
+                print(f"🗑️  Temp PDF deleted: {final_pdf}")
+
                 risk_score = min(len(explanations) * 20, 100)
                 
                 print(f"\n✅ PDF PROCESSING COMPLETE")
@@ -643,6 +686,14 @@ def upload():
         traceback.print_exc(file=sys.stderr)
         print(f"{'!'*70}\n")
         return jsonify({"error": str(e)}), 500
+    finally:
+        # Always delete the original temp input file
+        try:
+            if 'original_path' in locals() and original_path and os.path.exists(original_path):
+                os.remove(original_path)
+                print(f"🗑️  Input temp file deleted: {original_path}")
+        except Exception:
+            pass
 
 
 
@@ -658,11 +709,11 @@ def metadata():
     if file.filename == "":
         return jsonify({"error": "Empty filename"}), 400
 
-    filename = secure_filename(file.filename.lower())
-    uid = uuid.uuid4().hex
-    name, ext = os.path.splitext(filename)
-    original_path = os.path.join(UPLOAD_ORIGINAL, f"{name}_{uid}{ext}")
-    file.save(original_path)
+    suffix = os.path.splitext(secure_filename(file.filename.lower()))[1] or ".jpg"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    file.save(tmp.name)
+    tmp.close()
+    original_path = tmp.name
 
     try:
         img = Image.open(original_path)
@@ -700,6 +751,12 @@ def metadata():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Metadata extraction failed: {str(e)}"}), 500
+    finally:
+        try:
+            if os.path.exists(original_path):
+                os.remove(original_path)
+        except Exception:
+            pass
 
 
 @app.route("/strip-metadata", methods=["POST"])
@@ -714,14 +771,16 @@ def strip_metadata():
     if file.filename == "":
         return jsonify({"error": "Empty filename"}), 400
     
-    filename = secure_filename(file.filename.lower())
-    uid = uuid.uuid4().hex
-    name, ext = os.path.splitext(filename)
-    original_path = os.path.join(UPLOAD_ORIGINAL, f"{name}_{uid}{ext}")
-    file.save(original_path)
+    suffix = os.path.splitext(secure_filename(file.filename.lower()))[1] or ".jpg"
+    tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    file.save(tmp_in.name)
+    tmp_in.close()
+    original_path = tmp_in.name
 
-    clean_path = os.path.join(UPLOAD_REDACTED, f"{name}_{uid}_clean.png")
-    
+    tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    tmp_out.close()
+    clean_path = tmp_out.name
+
     try:
         remove_metadata(original_path, clean_path)
 
@@ -732,10 +791,17 @@ def strip_metadata():
             "redacted_image": encoded,
             "message": "Metadata stripped successfully"
         })
-        
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Metadata stripping failed: {str(e)}"}), 500
+    finally:
+        for p in [original_path, clean_path]:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
 
 
 # ============================================================================
@@ -744,10 +810,7 @@ def strip_metadata():
 
 if __name__ == "__main__":
     print("🚀 Starting Integrated Document Redaction Server...")
-    print("📁 Upload directories ready:")
-    print(f"   - Original: {UPLOAD_ORIGINAL}")
-    print(f"   - Redacted: {UPLOAD_REDACTED}")
-    print(f"   - Temp: {UPLOAD_TEMP}")
+    print("🔒 Zero-retention mode: all files processed in temp storage, deleted immediately")
     print("\n🔧 Available endpoints:")
     print("   - POST /upload (Sensitive data redaction)")
     print("   - POST /metadata (Extract metadata)")
