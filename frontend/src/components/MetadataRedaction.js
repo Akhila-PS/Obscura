@@ -55,7 +55,7 @@ export default function MetadataRedaction() {
     formData.append("image", file);
 
     try {
-      const res = await axios.post("${API}/metadata", formData, {
+      const res = await axios.post(`${API}/metadata`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 60000,
       });
@@ -79,7 +79,7 @@ export default function MetadataRedaction() {
     formData.append("image", file);
 
     try {
-      const res = await axios.post("${API}/strip-metadata", formData, {
+      const res = await axios.post(`${API}/strip-metadata`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 60000,
       });

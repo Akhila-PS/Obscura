@@ -91,7 +91,7 @@ function SensitiveRedaction({ mode, toggleColorMode }) {
 
     try {
       const isPdf = file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf";
-      const res = await axios.post("${API}/upload", formData, {
+      const res = await axios.post(`${API}/upload`, formData, {
         timeout: isPdf ? 600000 : 180000,
       });
 

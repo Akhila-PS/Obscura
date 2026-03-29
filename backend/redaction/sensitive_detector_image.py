@@ -368,9 +368,11 @@ def find_aadhaar_boxes(ocr_results):
         
         for pattern in patterns:
             if re.search(pattern, clean_text, re.IGNORECASE):
-                # Verify it's actually 12 digits
+                # Verify it's actually 12 digits and valid format
                 digits_only = re.sub(r'[^0-9]', '', clean_text)
                 if len(digits_only) == 12:
+                    if not is_valid_aadhaar_format(digits_only):
+                        continue
                     boxes.append(bbox)
                     print(f"✅ AADHAAR DETECTED: '{text}' → '{digits_only}' (confidence: {conf:.2f})")
                     break  # Don't double-count
@@ -435,6 +437,8 @@ def find_phone_boxes(ocr_results):
                     digits_only = digits_only[2:]
                 
                 if len(digits_only) == 10 and digits_only[0] in '6789':
+                    if has_exclusion_context(text):
+                        continue
                     boxes.append(bbox)
                     print(f"✅ PHONE DETECTED: '{text}' → '{digits_only}' (confidence: {conf:.2f})")
                     break
