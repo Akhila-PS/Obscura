@@ -1,6 +1,7 @@
 flask
 flask-cors
 opencv-python-headless
+python-bidi==0.4.2
 easyocr==1.7.1
 torch
 transformers
