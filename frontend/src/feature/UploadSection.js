@@ -18,22 +18,22 @@ export default function UploadSection({ onUpload }) {
     setIsDragOver(false);
   };
 
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      validateAndUpload(file);
-    }
-  };
-
   const handleFileSelect = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      validateAndUpload(file);
-    }
-  };
+  const selectedFile = e.target.files[0];  // rename to selectedFile
+  if (selectedFile) {
+    validateAndUpload(selectedFile);
+  }
+};
+
+const handleDrop = (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  setIsDragOver(false);
+  const selectedFile = e.dataTransfer.files[0];  // rename here too
+  if (selectedFile) {
+    validateAndUpload(selectedFile);
+  }
+};  
 
   const validateAndUpload = (file) => {
     const validTypes = ['image/', 'application/pdf'];
